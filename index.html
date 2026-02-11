@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HRD Master - 기업용 통합 교육 시스템 (Raw Data Sync)</title>
+    <title>HRD Master - 기업용 통합 교육 시스템 (Report Fixed)</title>
     
     <!-- 1. Core Libraries -->
     <script src="https://unpkg.com/react@18.2.0/umd/react.development.js" crossorigin></script>
@@ -103,19 +103,15 @@
         // [Integration] Data Manager (Raw Data Sync)
         // ------------------------------------------------------------------
         const DataManager = {
-            // [수정] 모든 employees 컬렉션을 있는 그대로 가져옴 (중복 필터링 제거)
             async subscribeToEmployees(onUpdate) {
                 if (!isFirebaseAvailable) return () => {};
 
                 console.log("📡 Subscribing to ALL 'employees' collections (collectionGroup mode)...");
 
-                // collectionGroup: DB 전체에서 'employees'라는 이름의 컬렉션을 모두 구독
                 const unsubscribe = db.collectionGroup('employees').onSnapshot((snapshot) => {
                     const employees = snapshot.docs.map(doc => {
                         const d = doc.data();
                         return {
-                            // 리액트 key 에러 방지를 위해, ID가 겹치면 문서 경로(path)를 ID로 활용할 수도 있으나
-                            // 사용자 요청대로 원본 데이터를 존중하여 d.id를 우선 사용
                             id: d.id || doc.id,
                             name: d.name || d.employeeName || d.userName || '이름 미상',
                             dept: d.dept || d.department || d.team || '미배정',
@@ -124,7 +120,6 @@
                             joinDate: d.joinDate || d.startDate || '',
                             riskScore: d.riskScore || 0,
                             complianceRate: d.complianceRate || 0,
-                            // 디버깅용: 데이터 출처 확인을 위해 경로 저장
                             _sourcePath: doc.ref.path 
                         };
                     });
@@ -303,6 +298,7 @@
             
             const filteredRecords = safeRecords.filter(r => r.date && r.date.startsWith(selectedYear));
 
+            // [수정] 보고서 테이블 구조 변경 (사번 제거, 순서: 부서 -> 성명 -> 직급 -> 이수율)
             return (
                 <div className="glass-panel rounded-2xl p-12 animate-fade-in text-center max-w-4xl mx-auto mt-8 no-print">
                     <div className="inline-flex justify-center items-center w-24 h-24 bg-gradient-to-br from-indigo-50 to-violet-50 rounded-full mb-6 shadow-sm"><Icons.FileText className="w-10 h-10 text-indigo-500" /></div>
@@ -327,8 +323,30 @@
                                     </table>
                                     <h3 className="text-lg font-bold mb-2 border-b pb-2">2. 이수 현황 ({filteredRecords.length}건)</h3>
                                     <table className="w-full text-sm border-collapse border">
-                                        <thead><tr className="bg-gray-100"><th className="border p-2">사번</th><th className="border p-2">성명</th><th className="border p-2">부서</th><th className="border p-2">이수율</th></tr></thead>
-                                        <tbody>{safeEmployees.map(e => <tr key={e.id}><td className="border p-2 text-center">{e.id}</td><td className="border p-2 text-center">{e.name}</td><td className="border p-2 text-center">{e.dept}</td><td className="border p-2 text-center">{e.complianceRate}%</td></tr>)}</tbody>
+                                        {/* [수정] 헤더 변경: 사번 제거, 부서->성명->직급->이수율 순서 변경 */}
+                                        <thead>
+                                            <tr className="bg-gray-100">
+                                                <th className="border p-2 w-1/4">부서</th>
+                                                <th className="border p-2 w-1/4">성명</th>
+                                                <th className="border p-2 w-1/4">직급</th>
+                                                <th className="border p-2 w-1/4">이수율</th>
+                                            </tr>
+                                        </thead>
+                                        {/* [수정] 바디 변경: 사번 제거 및 데이터 매핑 순서 변경 */}
+                                        <tbody>
+                                            {safeEmployees.map(e => (
+                                                <tr key={e.id}>
+                                                    <td className="border p-2 text-center">{e.dept}</td>
+                                                    <td className="border p-2 text-center font-bold">{e.name}</td>
+                                                    <td className="border p-2 text-center">{e.position}</td>
+                                                    <td className="border p-2 text-center">
+                                                        <span className={e.complianceRate < 100 ? "text-rose-600 font-bold" : "text-emerald-600 font-bold"}>
+                                                            {e.complianceRate}%
+                                                        </span>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
                                     </table>
                                 </div>
                             </div>
