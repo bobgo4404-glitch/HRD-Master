@@ -3,141 +3,192 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HRD Master x HR PRO Integration</title>
+    <title>HRD Master - 기업용 통합 교육 시스템 (Raw Data Sync)</title>
     
     <!-- 1. Core Libraries -->
     <script src="https://unpkg.com/react@18.2.0/umd/react.development.js" crossorigin></script>
     <script src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.development.js" crossorigin></script>
     <script src="https://unpkg.com/prop-types/prop-types.min.js"></script>
     <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
-    <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
-    <!-- Styles -->
+    <!-- 2. Firebase SDK (Compat Version for CDN) -->
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-analytics-compat.js"></script>
+
+    <!-- 3. Styles -->
     <style>
         @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+        
         body { font-family: 'Pretendard', sans-serif; background-color: #F8FAFC; color: #1E293B; }
         ::-webkit-scrollbar { width: 6px; height: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 10px; }
         ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+        .animate-fade-in { animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
         .glass-panel { background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(12px); border: 1px solid rgba(226, 232, 240, 0.8); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
         .modal-overlay { background-color: rgba(0, 0, 0, 0.5); backdrop-filter: blur(4px); z-index: 9999; }
-        .animate-fade-in { animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        
         @media print {
             .no-print { display: none !important; }
             .print-only { display: block !important; }
             body { background: white; }
             .glass-panel { box-shadow: none; border: 1px solid #ddd; }
         }
+        /* 실시간 상태 표시용 애니메이션 */
+        @keyframes pulse-green {
+            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+        .status-dot-active { animation: pulse-green 2s infinite; }
     </style>
 </head>
 <body>
     <div id="root"></div>
 
-    <script type="text/babel" data-type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-        import { getFirestore, collection, doc, onSnapshot, setDoc, deleteDoc, updateDoc, getDocs, query, limit } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
-        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
-
-        const { useState, useEffect } = React;
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
         const Recharts = window.Recharts || {};
-        const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, AreaChart, Area, PieChart, Pie, Cell } = Recharts;
+        const { 
+            BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, 
+            AreaChart, Area, Cell, PieChart, Pie, Radar, RadarChart, PolarGrid, 
+            PolarAngleAxis, PolarRadiusAxis 
+        } = Recharts;
 
-        // 전역 날짜 변수
         const TODAY = new Date();
         const CUR_YEAR = TODAY.getFullYear();
         const CUR_MONTH = TODAY.getMonth() + 1;
 
-        // ==========================================
-        // [설정 구역] Firebase Configuration
-        // ==========================================
-
-        const TARGET_APP_ID = "hr-pro-secure-v4"; 
-
-        const SEARCH_CANDIDATES = [
-            "hr_employees_v36", "hr_employees_v37", "hr_employees_v38", 
-            "employees", "users", "members", "staff", "personnel",
-            "data", "public_data", "user_list", "hr_data"
-        ];
-
-        // 1. HR PRO (사원 데이터 소스)
-        const hrProConfig = {
-            apiKey: "AIzaSyB1ArSM5lNFhhSeQ1NCiPEKOSaQxc4anSk",
-            authDomain: "hr-pro-ce4d0.firebaseapp.com",
-            projectId: "hr-pro-ce4d0",
-            storageBucket: "hr-pro-ce4d0.firebasestorage.app",
-            messagingSenderId: "723857885735",
-            appId: "1:723857885735:web:a7e5878e232f011f6a1c02",
-            measurementId: "G-VNNPXC31G1"
+        // ------------------------------------------------------------------
+        // [Integration] Firebase Configuration
+        // ------------------------------------------------------------------
+        const firebaseConfig = {
+            apiKey: "AIzaSyDm0qnGzq8P3zBBqW_4qjlMd9aq-QKrDyU",
+            authDomain: "hr-manager-6635c.firebaseapp.com",
+            projectId: "hr-manager-6635c",
+            storageBucket: "hr-manager-6635c.firebasestorage.app",
+            messagingSenderId: "796639392690",
+            appId: "1:796639392690:web:f218aa1f65c3b01518aaab",
+            measurementId: "G-HSN9YHSNNK"
         };
 
-        // 2. HRD Master (교육 데이터 저장소)
-        const hrdMasterConfig = {
-             apiKey: "AIzaSyAyD5om8NyiaKmwEy3TrnoHZ7ftLNLLdow",
-             authDomain: "hrd-master.firebaseapp.com",
-             projectId: "hrd-master",
-             storageBucket: "hrd-master.firebasestorage.app",
-             messagingSenderId: "135107134432",
-             appId: "1:135107134432:web:8c292d08cb564a27c2a185",
-             measurementId: "G-WZ1B513CYQ"
+        let db = null; 
+        let isFirebaseAvailable = false;
+
+        try {
+            if (firebaseConfig.apiKey && typeof firebase !== 'undefined' && !firebase.apps.length) {
+                firebase.initializeApp(firebaseConfig);
+                db = firebase.firestore();
+                isFirebaseAvailable = true;
+                
+                // [보안] 익명 로그인으로 읽기 권한 확보
+                firebase.auth().signInAnonymously()
+                    .then(() => console.log("🔐 Authenticated Anonymously"))
+                    .catch(e => console.warn("⚠️ Auth Warning:", e));
+
+                console.log("🔥 Firebase Connected");
+            }
+        } catch (error) { 
+            console.error("Firebase Init Error", error); 
+        }
+
+        // ------------------------------------------------------------------
+        // [Integration] Data Manager (Raw Data Sync)
+        // ------------------------------------------------------------------
+        const DataManager = {
+            // [수정] 모든 employees 컬렉션을 있는 그대로 가져옴 (중복 필터링 제거)
+            async subscribeToEmployees(onUpdate) {
+                if (!isFirebaseAvailable) return () => {};
+
+                console.log("📡 Subscribing to ALL 'employees' collections (collectionGroup mode)...");
+
+                // collectionGroup: DB 전체에서 'employees'라는 이름의 컬렉션을 모두 구독
+                const unsubscribe = db.collectionGroup('employees').onSnapshot((snapshot) => {
+                    const employees = snapshot.docs.map(doc => {
+                        const d = doc.data();
+                        return {
+                            // 리액트 key 에러 방지를 위해, ID가 겹치면 문서 경로(path)를 ID로 활용할 수도 있으나
+                            // 사용자 요청대로 원본 데이터를 존중하여 d.id를 우선 사용
+                            id: d.id || doc.id,
+                            name: d.name || d.employeeName || d.userName || '이름 미상',
+                            dept: d.dept || d.department || d.team || '미배정',
+                            position: d.position || d.rank || d.jobTitle || '사원',
+                            status: d.status || '재직',
+                            joinDate: d.joinDate || d.startDate || '',
+                            riskScore: d.riskScore || 0,
+                            complianceRate: d.complianceRate || 0,
+                            // 디버깅용: 데이터 출처 확인을 위해 경로 저장
+                            _sourcePath: doc.ref.path 
+                        };
+                    });
+                    
+                    console.log(`⚡ Raw Data Sync: Loaded ${employees.length} items.`);
+                    onUpdate(employees);
+                    
+                    localStorage.setItem('hrd_v8_employees', JSON.stringify(employees));
+                }, (error) => {
+                    console.error("🚨 Real-time Sync Error:", error);
+                });
+
+                return unsubscribe; 
+            },
+
+            async loadLocal(key, fallbackGenerator) {
+                const local = localStorage.getItem(`hrd_v8_${key}`); 
+                return local ? JSON.parse(local) : fallbackGenerator();
+            },
+
+            async saveLocal(key, data) {
+                localStorage.setItem(`hrd_v8_${key}`, JSON.stringify(data));
+            }
         };
 
-        const isMasterConfigValid = !!hrdMasterConfig.apiKey;
-        const activeMasterConfig = isMasterConfigValid ? hrdMasterConfig : hrProConfig;
+        const generateEmptyData = () => ({
+            courses: [],
+            schedules: [],
+            employees: [],
+            records: [],
+            analytics: [ 
+                {name: '리더십', sat: 0, app: 0}, 
+                {name: '직무기술', sat: 0, app: 0}, 
+                {name: '법정공통', sat: 0, app: 0}, 
+                {name: 'OA스킬', sat: 0, app: 0}
+            ]
+        });
 
-        // --- Firebase Init ---
-        const appMaster = initializeApp(activeMasterConfig, "HRD_MASTER");
-        const dbMaster = getFirestore(appMaster);
-        const authMaster = getAuth(appMaster);
-
-        const appHR = initializeApp(hrProConfig, "HR_PRO_LINK");
-        const dbHR = getFirestore(appHR);
-        const authHR = getAuth(appHR);
-
-        // --- Data Converter ---
-        const convertToEmployee = (doc) => {
-            const data = doc.data() || {};
-            return {
-                id: doc.id,
-                name: data.name || data.userName || data.fullName || data.koreanName || '이름미정',
-                dept: data.dept || data.department || data.teamName || data.team || '미배정',
-                position: data.position || data.rankName || data.rank || data.jobTitle || '사원',
-                status: data.status || '재직',
-                complianceRate: data.complianceRate || 0,
-                joinDate: data.joinDate || ''
-            };
-        };
-
-        // --- UI Components & Icons ---
+        // --- ICONS & UI COMPONENTS ---
         const Icons = {
-            LayoutDashboard: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>,
-            BookOpen: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>,
-            Calendar: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>,
-            Users: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
-            ShieldAlert: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>,
-            GraduationCap: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c3 3 9 3 12 0v-5"/></svg>,
-            BarChart3: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>,
-            FileText: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/></svg>,
-            Download: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>,
-            Search: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>,
-            ChevronRight: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>,
-            Plus: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>,
-            Trash2: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>,
-            Edit: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
-            Upload: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>,
-            Printer: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/></svg>,
-            X: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>,
-            TrendingUp: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>,
-            Target: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>,
-            Filter: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>,
-            List: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>,
-            Grid: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>,
-            CheckCircle: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>,
-            Activity: (p) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+            LayoutDashboard: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>,
+            BookOpen: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>,
+            Calendar: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></svg>,
+            Users: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+            ShieldAlert: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>,
+            GraduationCap: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 10v6M2 10l10-5 10 5-10 5z"/><path d="M6 12v5c3 3 9 3 12 0v-5"/></svg>,
+            BarChart3: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>,
+            FileText: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/></svg>,
+            Download: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>,
+            Search: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" x2="16.65" y1="21" y2="16.65"/></svg>,
+            ChevronRight: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>,
+            Plus: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>,
+            Trash2: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>,
+            Edit: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
+            Upload: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>,
+            Printer: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/></svg>,
+            X: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>,
+            TrendingUp: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>,
+            Target: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>,
+            Filter: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>,
+            List: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>,
+            Grid: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>,
+            CheckCircle: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>,
+            Database: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
         };
 
         const StatusBadge = ({ status }) => {
@@ -149,49 +200,48 @@
 
         // --- COMPONENTS ---
 
-        const SystemStatusModal = ({ onClose, status, dataCounts, authErrors, activeCollection, scanLog }) => (
-            <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay" onClick={onClose}>
-                <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-lg border border-gray-100" onClick={e => e.stopPropagation()}>
-                    <h3 className="text-lg font-bold mb-4 flex items-center text-gray-800"><Icons.Activity className="w-5 h-5 mr-2 text-indigo-600"/> AI 자동 연결 진단</h3>
-                    <div className="space-y-4 text-sm">
-                        <div className="bg-gray-50 p-4 rounded-lg">
-                            <h4 className="font-bold text-gray-700 mb-2">1. HR PRO (사원 DB)</h4>
-                            <div className="flex justify-between mb-1">
-                                <span>인증 상태:</span> 
-                                <span className={status.hrAuth ? "text-green-600 font-bold" : "text-red-500 font-bold"}>{status.hrAuth ? "연결됨" : "실패"}</span>
-                            </div>
-                            <div className="mt-3 p-3 bg-gray-100 rounded border border-gray-200 font-mono text-[10px] max-h-32 overflow-y-auto">
-                                <div className="font-bold text-gray-600 mb-1">[탐색 로그]</div>
-                                {scanLog.map((log, i) => (<div key={i} className={log.includes("성공") ? "text-green-600 font-bold" : "text-gray-400"}>{log}</div>))}
-                                {scanLog.length === 0 && <div className="text-gray-400">탐색 대기중...</div>}
-                            </div>
-                            <div className="flex justify-between mt-3"><span>가져온 사원 수:</span> <span className="font-bold text-indigo-600 text-lg">{dataCounts.employees} 명</span></div>
-                        </div>
-                        <div className="bg-gray-50 p-4 rounded-lg">
-                            <h4 className="font-bold text-gray-700 mb-2">2. HRD Master (교육 DB)</h4>
-                            <div className="flex justify-between"><span>설정 상태:</span> <span className={status.masterConfig ? "text-green-600" : "text-rose-500 font-bold"}>{status.masterConfig ? "정상" : "API Key 누락"}</span></div>
-                        </div>
-                    </div>
-                    <button onClick={onClose} className="w-full bg-indigo-600 text-white py-2.5 rounded-xl font-bold mt-6 hover:bg-indigo-700 transition">닫기</button>
-                </div>
-            </div>
-        );
-
-        const Analytics = ({ analytics, employees, records, courses, selectedYear, onUpdateAnalytics }) => {
-            const [data, setData] = useState(analytics.length > 0 ? analytics : [
-                {name: '리더십', sat: 0, app: 0}, {name: '직무기술', sat: 0, app: 0}, {name: '법정공통', sat: 0, app: 0}, {name: 'OA스킬', sat: 0, app: 0}
-            ]);
+        const Analytics = ({ analytics, onUpdateAnalytics, employees, records, courses, selectedYear }) => {
+            const safeAnalytics = (Array.isArray(analytics) && analytics.length > 0) ? analytics : [
+                {name: '리더십', sat: 0, app: 0}, 
+                {name: '직무기술', sat: 0, app: 0}, 
+                {name: '법정공통', sat: 0, app: 0}, 
+                {name: 'OA스킬', sat: 0, app: 0}
+            ];
+            
             const [isEdit, setIsEdit] = useState(false);
+            const [data, setData] = useState(safeAnalytics);
 
-            useEffect(() => { if(analytics.length > 0) setData(analytics); }, [analytics]);
+            useEffect(() => {
+                if(Array.isArray(analytics) && analytics.length > 0) setData(analytics);
+            }, [analytics]);
 
             const handleSave = () => { onUpdateAnalytics(data); setIsEdit(false); };
             const handleChange = (idx, field, val) => {
-                const newData = [...data]; newData[idx][field] = parseFloat(val); setData(newData);
+                const newData = [...data];
+                newData[idx][field] = parseFloat(val);
+                setData(newData);
             };
 
-            const filteredRecords = records.filter(r => r.date && r.date.startsWith(selectedYear));
-            
+             const filteredRecords = (records || []).filter(r => r.date && r.date.startsWith(selectedYear));
+             const safeEmployees = employees || [];
+             
+            const rankStats = filteredRecords.reduce((acc, r) => {
+                const emp = safeEmployees.find(e => e.id === r.empId);
+                if (emp && r.status === '이수') {
+                    const rank = emp.position || '미지정';
+                    if (!acc[rank]) acc[rank] = 0;
+                    acc[rank]++;
+                }
+                return acc;
+            }, {});
+             const rankChartData = Object.keys(rankStats).length > 0
+                ? Object.keys(rankStats).map(key => ({
+                    name: key,
+                    count: rankStats[key]
+                })).sort((a, b) => b.count - a.count)
+                : [{name: '데이터 없음', count: 0}];
+
+
             return (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
                     <div className="glass-panel p-6 rounded-2xl relative">
@@ -211,14 +261,28 @@
                             </div>
                         ) : (
                             <div className="h-72">
-                                <ResponsiveContainer width="100%" height="100%">
-                                    <BarChart data={data} barSize={20}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name"/><YAxis domain={[0, 5]}/><Tooltip/><Legend/><Bar dataKey="sat" name="만족도" fill="#818CF8" radius={[4, 4, 0, 0]} isAnimationActive={false} /><Bar dataKey="app" name="현업적용도" fill="#34D399" radius={[4, 4, 0, 0]} isAnimationActive={false} /></BarChart>
-                                </ResponsiveContainer>
+                                {data.length > 0 ? (
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <BarChart data={data} barSize={20}>
+                                            <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                                            <XAxis dataKey="name"/>
+                                            <YAxis domain={[0, 5]}/>
+                                            <Tooltip/>
+                                            <Legend/>
+                                            <Bar dataKey="sat" name="만족도" fill="#818CF8" radius={[4, 4, 0, 0]} />
+                                            <Bar dataKey="app" name="현업적용도" fill="#34D399" radius={[4, 4, 0, 0]} />
+                                        </BarChart>
+                                    </ResponsiveContainer>
+                                ) : (
+                                    <div className="flex items-center justify-center h-full text-gray-400">데이터가 없습니다</div>
+                                )}
                             </div>
                         )}
                     </div>
                     <div className="glass-panel p-6 rounded-2xl flex flex-col justify-center items-center text-center">
-                        <div className="bg-emerald-100 p-4 rounded-full mb-4"><Icons.CheckCircle className="w-8 h-8 text-emerald-600"/></div>
+                        <div className="bg-emerald-100 p-4 rounded-full mb-4">
+                            <Icons.CheckCircle className="w-8 h-8 text-emerald-600"/>
+                        </div>
                         <h3 className="font-bold text-gray-800 mb-2">교육 이수 완료율</h3>
                         <div className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-emerald-600 to-teal-600 mb-2">
                              {employees.length > 0 ? Math.round((filteredRecords.length / employees.length) * 100) : 0}%
@@ -232,29 +296,39 @@
         const Reports = ({ employees, courses, records, selectedYear }) => {
             const [isPreview, setIsPreview] = useState(false);
             const handlePrint = () => window.print();
-            const filteredRecords = records.filter(r => r.date && r.date.startsWith(selectedYear));
+
+            const safeRecords = records || [];
+            const safeEmployees = employees || [];
+            const safeCourses = courses || [];
+            
+            const filteredRecords = safeRecords.filter(r => r.date && r.date.startsWith(selectedYear));
 
             return (
                 <div className="glass-panel rounded-2xl p-12 animate-fade-in text-center max-w-4xl mx-auto mt-8 no-print">
                     <div className="inline-flex justify-center items-center w-24 h-24 bg-gradient-to-br from-indigo-50 to-violet-50 rounded-full mb-6 shadow-sm"><Icons.FileText className="w-10 h-10 text-indigo-500" /></div>
                     <h2 className="text-2xl font-bold text-gray-900 mb-3">보고서 자동 생성</h2>
                     <p className="text-gray-500 mb-10 text-lg">실시간 데이터를 기반으로 {selectedYear}년도 결과 보고서를 생성합니다.</p>
-                    <button onClick={() => setIsPreview(true)} className="px-8 py-4 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 shadow-lg flex items-center justify-center mx-auto font-bold text-lg"><Icons.Download className="w-5 h-5 mr-3"/> 보고서 미리보기 & 출력</button>
+                    <button onClick={() => setIsPreview(true)} className="px-8 py-4 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 shadow-lg flex items-center justify-center mx-auto transition transform hover:-translate-y-1 font-bold text-lg"><Icons.Download className="w-5 h-5 mr-3"/> 보고서 미리보기 & 출력</button>
 
                     {isPreview && (
                         <div className="fixed inset-0 z-50 bg-white overflow-y-auto print-only">
                             <div className="max-w-4xl mx-auto p-10">
                                 <div className="flex justify-between items-center mb-8 no-print">
                                     <h1 className="text-2xl font-bold">미리보기</h1>
-                                    <div className="space-x-2"><button onClick={handlePrint} className="bg-indigo-600 text-white px-4 py-2 rounded">인쇄</button><button onClick={() => setIsPreview(false)} className="bg-gray-200 px-4 py-2 rounded">닫기</button></div>
+                                    <div className="space-x-2"><button onClick={handlePrint} className="bg-indigo-600 text-white px-4 py-2 rounded"><Icons.Printer className="w-4 h-4 inline mr-2"/>인쇄/PDF저장</button><button onClick={() => setIsPreview(false)} className="bg-gray-200 px-4 py-2 rounded">닫기</button></div>
                                 </div>
                                 <div className="border p-8">
-                                    <h1 className="text-3xl font-bold text-center mb-4">{selectedYear}년도 교육 결과 보고서</h1>
+                                    <h1 className="text-3xl font-bold text-center mb-4">{selectedYear}년도 법정 의무교육 결과 보고서</h1>
                                     <p className="text-center text-gray-500 mb-8">작성일: {new Date().toLocaleDateString()}</p>
-                                    <h3 className="text-lg font-bold mb-2 border-b pb-2">1. 이수 현황 ({filteredRecords.length}건)</h3>
+                                    <h3 className="text-lg font-bold mb-2 border-b pb-2">1. 교육 개요</h3>
+                                    <table className="w-full text-sm mb-8 border-collapse border">
+                                        <thead><tr className="bg-gray-100"><th className="border p-2">과정명</th><th className="border p-2">법령</th><th className="border p-2">대상</th></tr></thead>
+                                        <tbody>{safeCourses.filter(c => c.type === '법정').map(c => <tr key={c.id}><td className="border p-2">{c.name}</td><td className="border p-2">{c.law}</td><td className="border p-2">{c.target}</td></tr>)}</tbody>
+                                    </table>
+                                    <h3 className="text-lg font-bold mb-2 border-b pb-2">2. 이수 현황 ({filteredRecords.length}건)</h3>
                                     <table className="w-full text-sm border-collapse border">
                                         <thead><tr className="bg-gray-100"><th className="border p-2">사번</th><th className="border p-2">성명</th><th className="border p-2">부서</th><th className="border p-2">이수율</th></tr></thead>
-                                        <tbody>{employees.slice(0, 20).map(e => <tr key={e.id}><td className="border p-2 text-center">{e.id}</td><td className="border p-2 text-center">{e.name}</td><td className="border p-2 text-center">{e.dept}</td><td className="border p-2 text-center">{e.complianceRate}%</td></tr>)}</tbody>
+                                        <tbody>{safeEmployees.map(e => <tr key={e.id}><td className="border p-2 text-center">{e.id}</td><td className="border p-2 text-center">{e.name}</td><td className="border p-2 text-center">{e.dept}</td><td className="border p-2 text-center">{e.complianceRate}%</td></tr>)}</tbody>
                                     </table>
                                 </div>
                             </div>
@@ -264,79 +338,310 @@
             );
         };
 
-        const Dashboard = ({ courses, records, employees, schedules, selectedYear }) => {
-            const filteredRecords = records.filter(r => r.date && r.date.startsWith(selectedYear));
-            const filteredSchedules = schedules.filter(s => s.date && s.date.startsWith(selectedYear));
-            const completedRecords = filteredRecords.filter(r => r.status === '이수').length;
-            const complianceRate = employees.length > 0 ? Math.round((completedRecords / employees.length) * 100) : 0;
-            const hoursPerCapita = employees.length > 0 ? (filteredRecords.length * 2 / employees.length).toFixed(1) : 0;
+        const EmployeeHistory = ({ employees, records, courses, selectedId, onBack, onUpdateRecords, selectedYear }) => {
+            const [isModalOpen, setIsModalOpen] = useState(false);
+            const [form, setForm] = useState({ courseId: '', date: '', score: 0, status: '이수' });
+            
+            const emp = (employees || []).find(e => e.id === selectedId);
 
-            const deptStats = employees.reduce((acc, emp) => {
+            if (!selectedId || !emp) {
+                return (
+                    <div className="glass-panel rounded-2xl p-10 text-center animate-fade-in">
+                        <Icons.Users className="w-16 h-16 text-indigo-400 mx-auto mb-4" />
+                        <h3 className="text-xl font-bold text-gray-800">
+                            {!selectedId ? "조회할 사원을 선택해주세요" : "사원 정보를 찾을 수 없습니다"}
+                        </h3>
+                        <p className="text-gray-500 mb-6">좌측 '사원 관리' 메뉴 이용</p>
+                        <button onClick={onBack} className="bg-indigo-600 text-white px-6 py-2 rounded-lg">목록으로</button>
+                    </div>
+                );
+            }
+            
+            const empRecords = (records || []).filter(r => r.empId === emp.id);
+
+            const handleDelete = (id) => {
+                if(confirm("기록을 삭제하시겠습니까?")) onUpdateRecords(records.filter(r => r.id !== id));
+            };
+
+            const handleAdd = () => {
+                if(!form.courseId) return alert("과정을 선택하세요");
+                const newRecord = { ...form, id: `R${Date.now()}`, empId: emp.id, evidence: true };
+                onUpdateRecords([...records, newRecord]);
+                setIsModalOpen(false);
+            };
+
+            return (
+                 <div className="glass-panel rounded-2xl p-8 animate-fade-in max-w-5xl mx-auto">
+                    <button onClick={onBack} className="mb-6 text-sm text-gray-500 flex items-center hover:text-indigo-600"><Icons.ChevronRight className="w-3 h-3 transform rotate-180 mr-1"/> 목록으로 돌아가기</button>
+                    <div className="flex justify-between items-center mb-8 pb-8 border-b border-gray-100">
+                        <div className="flex items-center space-x-6">
+                            <div className="w-20 h-20 rounded-2xl bg-slate-200 flex items-center justify-center text-3xl font-bold text-slate-600">{emp.name ? emp.name[0] : '?'}</div>
+                            <div><h2 className="text-3xl font-bold text-gray-900">{emp.name} <span className="text-xl text-gray-500 font-normal">{emp.position}</span></h2><p className="text-gray-500">{emp.dept} | {emp.id}</p></div>
+                        </div>
+                        <button onClick={() => setIsModalOpen(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow hover:bg-indigo-700">+ 이력 수동 등록</button>
+                    </div>
+                    <div className="space-y-4">
+                        {empRecords.map(r => {
+                            const course = (courses || []).find(c => c.id === r.courseId) || { name: '삭제된 과정', type: '-' };
+                            return (
+                                <div key={r.id} className="flex justify-between items-center p-5 bg-white border border-gray-100 rounded-xl hover:shadow-md transition">
+                                    <div><div className="flex items-center space-x-3 mb-1"><StatusBadge status={course.type} /><span className="font-bold text-gray-800 text-lg">{course.name}</span></div><div className="text-sm text-gray-500">완료: {r.date} | 점수: {r.score}점</div></div>
+                                    <div className="flex items-center space-x-3">
+                                        <StatusBadge status={r.status} />
+                                        <button onClick={() => handleDelete(r.id)} className="text-rose-500 hover:bg-rose-50 p-2 rounded"><Icons.Trash2 className="w-4 h-4"/></button>
+                                    </div>
+                                </div>
+                            )
+                        })}
+                        {empRecords.length === 0 && <div className="text-center py-10 text-gray-400">이수 내역이 없습니다.</div>}
+                    </div>
+                    {isModalOpen && ReactDOM.createPortal(
+                        <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay" onClick={() => setIsModalOpen(false)}>
+                            <div className="bg-white p-8 rounded-2xl shadow-xl w-96" onClick={e => e.stopPropagation()}>
+                                <h3 className="font-bold text-lg mb-4">교육 이력 등록</h3>
+                                <select className="w-full border p-2 rounded mb-2" onChange={e => setForm({...form, courseId: e.target.value})}>
+                                    <option value="">과정 선택</option>
+                                    {(courses || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                </select>
+                                <input type="date" className="w-full border p-2 rounded mb-2" onChange={e => setForm({...form, date: e.target.value})}/>
+                                <input type="number" placeholder="점수" className="w-full border p-2 rounded mb-4" onChange={e => setForm({...form, score: e.target.value})}/>
+                                <button onClick={handleAdd} className="w-full bg-indigo-600 text-white py-2 rounded font-bold">등록</button>
+                            </div>
+                        </div>,
+                        document.body
+                    )}
+                 </div>
+            );
+        };
+
+        const Dashboard = ({ courses, records, employees, schedules, selectedYear }) => {
+            const safeRecords = records || [];
+            const safeSchedules = schedules || [];
+            const safeCourses = courses || [];
+            const safeEmployees = employees || [];
+
+            const filteredRecords = safeRecords.filter(r => r.date && r.date.startsWith(selectedYear));
+            const filteredSchedules = safeSchedules.filter(s => s.date && s.date.startsWith(selectedYear));
+
+            const totalEmp = safeEmployees.length; 
+            const activeCourses = safeCourses.length;
+            const completedRecords = filteredRecords.filter(r => r.status === '이수').length;
+            
+            const requiredCourses = safeCourses.filter(c => c.type === '법정');
+            const totalRequired = totalEmp * requiredCourses.length;
+            const complianceRate = totalRequired > 0 ? Math.round((completedRecords / totalRequired) * 100) : 0;
+            
+            const totalTrainingHours = filteredRecords.length * 2; 
+            const hoursPerCapita = totalEmp > 0 ? (totalTrainingHours / totalEmp).toFixed(1) : 0;
+
+            const deptStats = safeEmployees.reduce((acc, emp) => {
                 if (!acc[emp.dept]) acc[emp.dept] = { name: emp.dept, count: 0 };
                 const empRecords = filteredRecords.filter(r => r.empId === emp.id && r.status === '이수').length;
                 acc[emp.dept].count += empRecords;
                 return acc;
             }, {});
-            const deptChartData = Object.values(deptStats).length > 0 ? Object.values(deptStats).sort((a,b)=>b.count-a.count) : [{name: '데이터 없음', count: 0}];
+            const deptChartData = Object.values(deptStats).length > 0 
+                ? Object.values(deptStats).sort((a,b) => b.count - a.count)
+                : [{name: '데이터 없음', count: 0}];
+
+            const rankStats = filteredRecords.reduce((acc, r) => {
+                const emp = safeEmployees.find(e => e.id === r.empId);
+                if (emp && r.status === '이수') {
+                    const rank = emp.position || '미지정';
+                    if (!acc[rank]) acc[rank] = 0;
+                    acc[rank]++;
+                }
+                return acc;
+            }, {});
+
+            const rankChartData = Object.keys(rankStats).length > 0
+                ? Object.keys(rankStats).map(key => ({
+                    name: key,
+                    count: rankStats[key]
+                })).sort((a, b) => b.count - a.count)
+                : [{name: '데이터 없음', count: 0}];
 
             const monthlyCounts = filteredSchedules.reduce((acc, curr) => {
-                const month = curr.date.split('-')[1]; const key = parseInt(month, 10) + '월';
-                if (!acc[key]) acc[key] = 0; acc[key]++; return acc;
+                const month = curr.date.split('-')[1]; 
+                const key = parseInt(month, 10) + '월';
+                if (!acc[key]) acc[key] = 0;
+                acc[key]++;
+                return acc;
             }, {});
-            const monthlyData = Object.keys(monthlyCounts).length > 0 ? Object.keys(monthlyCounts).sort((a,b)=>parseInt(a)-parseInt(b)).map(k => ({ name: k, act: monthlyCounts[k] })) : [{name: '데이터 없음', act: 0}];
 
-            const categoryData = [{ name: '법정', value: courses.filter(c => c.type === '법정').length }, { name: '직무', value: courses.filter(c => c.type === '직무').length }, { name: '역량', value: courses.filter(c => c.type === '역량').length }].filter(d=>d.value>0);
-            const pieChartData = categoryData.length > 0 ? categoryData : [{name: '없음', value: 1}];
-            const COLORS = ['#6366F1', '#10B981', '#F59E0B'];
+            const monthlyData = Object.keys(monthlyCounts).length > 0 
+                ? Object.keys(monthlyCounts).sort((a,b) => parseInt(a)-parseInt(b)).map(k => ({ name: k, act: monthlyCounts[k], plan: monthlyCounts[k] + 2 }))
+                : [ { name: '1월', plan: 0, act: 0 }, { name: '2월', plan: 0, act: 0 }, { name: '3월', plan: 0, act: 0 }, { name: '4월', plan: 0, act: 0 } ];
+
+            const categoryData = [
+                { name: '법정의무', value: safeCourses.filter(c => c.type === '법정').length },
+                { name: '직무심화', value: safeCourses.filter(c => c.type === '직무').length },
+                { name: '리더십', value: safeCourses.filter(c => c.type === '역량').length },
+            ].filter(d => d.value > 0);
+            
+            const pieChartData = categoryData.length > 0 ? categoryData : [{ name: '데이터 없음', value: 100 }];
+            const pieColors = ['#6366F1', '#10B981', '#F59E0B', '#F43F5E'];
 
             return (
                 <div className="space-y-6 animate-fade-in pb-12">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div>
+                            <h2 className="text-2xl font-bold text-gray-800 tracking-tight">HRD Executive Dashboard</h2>
+                            <p className="text-sm text-gray-500 mt-1">{selectedYear}년도 교육 성과 분석</p>
+                        </div>
+                        <div className="flex items-center space-x-2 bg-white px-4 py-2 rounded-xl shadow-sm border border-gray-200">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500 status-dot-active"></span>
+                            <span className="text-sm font-semibold text-gray-600">실시간 연동 중 (Real-time Sync)</span>
+                        </div>
+                    </div>
+
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                         <div className="glass-panel p-6 rounded-2xl relative overflow-hidden group">
-                            <div className="flex justify-between items-start mb-2"><div className="p-2 bg-indigo-50 rounded-lg text-indigo-600"><Icons.Users className="w-6 h-6"/></div><span className="text-xs font-bold px-2 py-1 rounded-full bg-gray-100 text-gray-500">Total</span></div>
-                            <div className="mt-2"><p className="text-sm text-gray-500 font-medium">총 임직원</p><h3 className="text-3xl font-bold text-gray-900 mt-1">{employees.length}<span className="text-lg font-normal text-gray-400 ml-1">명</span></h3></div>
+                            <div className="flex justify-between items-start mb-2">
+                                <div className="p-2 bg-indigo-50 rounded-lg text-indigo-600"><Icons.Users className="w-6 h-6"/></div>
+                                <span className="text-xs font-bold px-2 py-1 rounded-full bg-gray-100 text-gray-500">Total</span>
+                            </div>
+                            <div className="mt-2">
+                                <p className="text-sm text-gray-500 font-medium">총 임직원</p>
+                                <h3 className="text-3xl font-bold text-gray-900 mt-1">{totalEmp}<span className="text-lg font-normal text-gray-400 ml-1">명</span></h3>
+                            </div>
                         </div>
                         <div className="glass-panel p-6 rounded-2xl relative overflow-hidden group">
-                            <div className="flex justify-between items-start mb-2"><div className="p-2 bg-rose-50 rounded-lg text-rose-600"><Icons.Target className="w-6 h-6"/></div><span className="text-xs font-bold px-2 py-1 rounded-full bg-gray-100 text-gray-500">이수율</span></div>
-                            <div className="mt-2"><p className="text-sm text-gray-500 font-medium">법정 교육 이수율</p><h3 className="text-3xl font-bold text-gray-900 mt-1">{complianceRate}<span className="text-lg font-normal text-gray-400 ml-1">%</span></h3></div>
-                            <div className="w-full bg-gray-100 h-1.5 mt-4 rounded-full overflow-hidden"><div className="h-full bg-rose-500" style={{width: `${complianceRate}%`}}></div></div>
+                            <div className="flex justify-between items-start mb-2">
+                                <div className="p-2 bg-rose-50 rounded-lg text-rose-600"><Icons.Target className="w-6 h-6"/></div>
+                                <span className="text-xs font-bold px-2 py-1 rounded-full bg-gray-100 text-gray-500">이수율</span>
+                            </div>
+                            <div className="mt-2">
+                                <p className="text-sm text-gray-500 font-medium">법정 교육 이수율</p>
+                                <h3 className="text-3xl font-bold text-gray-900 mt-1">{complianceRate}<span className="text-lg font-normal text-gray-400 ml-1">%</span></h3>
+                            </div>
+                            <div className="w-full bg-gray-100 h-1.5 mt-4 rounded-full overflow-hidden">
+                                <div className="h-full bg-rose-500 transition-all duration-1000" style={{width: `${complianceRate}%`}}></div>
+                            </div>
                         </div>
-                        <div className="glass-panel p-6 rounded-2xl relative overflow-hidden group">
-                            <div className="flex justify-between items-start mb-2"><div className="p-2 bg-emerald-50 rounded-lg text-emerald-600"><Icons.BookOpen className="w-6 h-6"/></div><span className="text-xs font-bold px-2 py-1 rounded-full bg-emerald-50 text-emerald-600">Avg</span></div>
-                            <div className="mt-2"><p className="text-sm text-gray-500 font-medium">1인당 평균 학습</p><h3 className="text-3xl font-bold text-gray-900 mt-1">{hoursPerCapita}<span className="text-lg font-normal text-gray-400 ml-1">Hrs</span></h3></div>
+                         <div className="glass-panel p-6 rounded-2xl relative overflow-hidden group">
+                            <div className="flex justify-between items-start mb-2">
+                                <div className="p-2 bg-emerald-50 rounded-lg text-emerald-600"><Icons.BookOpen className="w-6 h-6"/></div>
+                                <span className="text-xs font-bold px-2 py-1 rounded-full bg-emerald-50 text-emerald-600">Avg</span>
+                            </div>
+                            <div className="mt-2">
+                                <p className="text-sm text-gray-500 font-medium">1인당 평균 학습시간</p>
+                                <h3 className="text-3xl font-bold text-gray-900 mt-1">{hoursPerCapita}<span className="text-lg font-normal text-gray-400 ml-1">Hrs</span></h3>
+                            </div>
                         </div>
-                        <div className="glass-panel p-6 rounded-2xl relative overflow-hidden group">
-                            <div className="flex justify-between items-start mb-2"><div className="p-2 bg-amber-50 rounded-lg text-amber-600"><Icons.TrendingUp className="w-6 h-6"/></div><span className="text-xs font-bold px-2 py-1 rounded-full bg-amber-50 text-amber-600">ROI</span></div>
-                            <div className="mt-2"><p className="text-sm text-gray-500 font-medium">교육 투자 ROI</p><h3 className="text-3xl font-bold text-gray-900 mt-1">{filteredRecords.length > 0 ? '154' : '0'}<span className="text-lg font-normal text-gray-400 ml-1">%</span></h3></div>
+                         <div className="glass-panel p-6 rounded-2xl relative overflow-hidden group">
+                            <div className="flex justify-between items-start mb-2">
+                                <div className="p-2 bg-amber-50 rounded-lg text-amber-600"><Icons.TrendingUp className="w-6 h-6"/></div>
+                                <span className="text-xs font-bold px-2 py-1 rounded-full bg-amber-50 text-amber-600">ROI</span>
+                            </div>
+                            <div className="mt-2">
+                                <p className="text-sm text-gray-500 font-medium">교육 투자 ROI</p>
+                                <h3 className="text-3xl font-bold text-gray-900 mt-1">{filteredRecords.length > 0 ? '154' : '0'}<span className="text-lg font-normal text-gray-400 ml-1">%</span></h3>
+                            </div>
                         </div>
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[400px]">
                         <div className="glass-panel p-6 rounded-2xl lg:col-span-2 flex flex-col">
-                            <h4 className="font-bold text-gray-800 text-lg mb-6 flex items-center"><span className="w-2 h-6 bg-indigo-500 rounded-full mr-2"></span>월별 교육 실적 ({selectedYear})</h4>
+                            <div className="flex justify-between items-center mb-6">
+                                <h4 className="font-bold text-gray-800 text-lg flex items-center">
+                                    <span className="w-2 h-6 bg-indigo-500 rounded-full mr-2"></span>
+                                    월별 교육 실적 ({selectedYear})
+                                </h4>
+                            </div>
                             <div className="flex-1 w-full min-h-0">
                                 <ResponsiveContainer width="100%" height="100%">
-                                    <AreaChart data={monthlyData}><defs><linearGradient id="colorAct" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#6366F1" stopOpacity={0.3}/><stop offset="95%" stopColor="#6366F1" stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0"/><XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#94A3B8', fontSize: 12}} dy={10} /><YAxis axisLine={false} tickLine={false} tick={{fill: '#94A3B8', fontSize: 12}} /><Tooltip contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)'}} /><Area type="monotone" dataKey="act" stroke="#6366F1" strokeWidth={3} fillOpacity={1} fill="url(#colorAct)" isAnimationActive={false} /></AreaChart>
+                                    <AreaChart data={monthlyData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                                        <defs>
+                                            <linearGradient id="colorAct" x1="0" y1="0" x2="0" y2="1">
+                                                <stop offset="5%" stopColor="#6366F1" stopOpacity={0.3}/>
+                                                <stop offset="95%" stopColor="#6366F1" stopOpacity={0}/>
+                                            </linearGradient>
+                                        </defs>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0"/>
+                                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#94A3B8', fontSize: 12}} dy={10} />
+                                        <YAxis axisLine={false} tickLine={false} tick={{fill: '#94A3B8', fontSize: 12}} />
+                                        <Tooltip contentStyle={{borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)'}} />
+                                        <Area type="monotone" dataKey="act" stroke="#6366F1" strokeWidth={3} fillOpacity={1} fill="url(#colorAct)" />
+                                    </AreaChart>
                                 </ResponsiveContainer>
                             </div>
                         </div>
+
                         <div className="glass-panel p-6 rounded-2xl flex flex-col">
-                            <h4 className="font-bold text-gray-800 text-lg mb-4 flex items-center"><span className="w-2 h-6 bg-emerald-500 rounded-full mr-2"></span>부서별 이수 현황</h4>
+                            <div className="mb-4">
+                                <h4 className="font-bold text-gray-800 text-lg flex items-center">
+                                    <span className="w-2 h-6 bg-emerald-500 rounded-full mr-2"></span>
+                                    부서별 이수 현황
+                                </h4>
+                                <p className="text-xs text-gray-400">데이터 기반 부서별 교육 참여도</p>
+                            </div>
                             <div className="flex-1 w-full min-h-0 relative">
                                 <ResponsiveContainer width="100%" height="100%">
-                                    <BarChart layout="vertical" data={deptChartData}><CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#E2E8F0"/><XAxis type="number" hide /><YAxis dataKey="name" type="category" tick={{fontSize: 12, fill: '#475569'}} width={60} /><Tooltip cursor={{fill: '#F1F5F9'}} contentStyle={{borderRadius: '8px'}} /><Bar dataKey="count" fill="#10B981" radius={[0, 4, 4, 0]} barSize={20} isAnimationActive={false} /></BarChart>
+                                    <BarChart layout="vertical" data={deptChartData} margin={{ top: 0, right: 20, bottom: 0, left: 30 }}>
+                                        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#E2E8F0"/>
+                                        <XAxis type="number" hide />
+                                        <YAxis dataKey="name" type="category" tick={{fontSize: 12, fill: '#475569'}} width={60} />
+                                        <Tooltip cursor={{fill: '#F1F5F9'}} contentStyle={{borderRadius: '8px'}} />
+                                        <Bar dataKey="count" fill="#10B981" radius={[0, 4, 4, 0]} barSize={20} />
+                                    </BarChart>
                                 </ResponsiveContainer>
+                                {filteredRecords.length === 0 && (
+                                    <div className="absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-sm z-10">
+                                        <span className="text-sm font-bold text-gray-500 bg-white px-3 py-1 rounded-full shadow">데이터 없음</span>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>
+
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6 h-[300px]">
-                        <div className="glass-panel p-6 rounded-2xl flex flex-col">
+                         <div className="glass-panel p-6 rounded-2xl flex flex-col">
                             <h4 className="font-bold text-gray-800 text-lg mb-4">운영 포트폴리오</h4>
                             <div className="flex-1 relative">
                                 <ResponsiveContainer width="100%" height="100%">
-                                    <PieChart><Pie data={pieChartData} cx="50%" cy="50%" innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value" isAnimationActive={false}>{pieChartData.map((entry, index) => (<Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />))}</Pie><Tooltip /><Legend verticalAlign="bottom"/></PieChart>
+                                    <PieChart>
+                                        <Pie data={pieChartData} cx="50%" cy="50%" innerRadius={60} outerRadius={80} paddingAngle={5} dataKey="value">
+                                            {pieChartData.map((entry, index) => (
+                                                <Cell key={`cell-${index}`} fill={categoryData.length > 0 ? pieColors[index % pieColors.length] : '#E2E8F0'} />
+                                            ))}
+                                        </Pie>
+                                        <Tooltip />
+                                        <Legend verticalAlign="bottom" height={36}/>
+                                    </PieChart>
                                 </ResponsiveContainer>
-                                <div className="absolute inset-0 flex items-center justify-center pointer-events-none"><div className="text-center"><span className="text-3xl font-bold text-gray-800">{courses.length}</span><span className="block text-xs text-gray-400">Courses</span></div></div>
+                                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                    <div className="text-center">
+                                        <span className="text-3xl font-bold text-gray-800">{activeCourses}</span>
+                                        <span className="block text-xs text-gray-400">Courses</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="glass-panel p-6 rounded-2xl md:col-span-2 flex flex-col justify-center">
+                            <div className="flex justify-between items-end mb-6">
+                                <div>
+                                    <h4 className="font-bold text-gray-800 text-lg">직급별 교육 이수 현황</h4>
+                                    <p className="text-sm text-gray-400">{selectedYear}년 직급별 완료 건수</p>
+                                </div>
+                            </div>
+                            <div className="h-40 w-full">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <BarChart data={rankChartData} layout="vertical" barSize={20} margin={{ top: 0, right: 30, left: 20, bottom: 0 }}>
+                                        <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#E2E8F0"/>
+                                        <XAxis type="number" hide />
+                                        <YAxis dataKey="name" type="category" tick={{fill: '#64748B', fontSize: 12}} width={60}/>
+                                        <Tooltip cursor={{fill: '#F8FAFC'}} contentStyle={{borderRadius: '8px'}} />
+                                        <Legend />
+                                        <Bar dataKey="count" name="이수 완료" fill="#6366F1" radius={[0, 4, 4, 0]} />
+                                    </BarChart>
+                                </ResponsiveContainer>
+                                {filteredRecords.length === 0 && (
+                                    <div className="absolute inset-0 flex items-center justify-center bg-white/50 backdrop-blur-sm z-10">
+                                        <span className="text-sm font-bold text-gray-500 bg-white px-3 py-1 rounded-full shadow">데이터 없음</span>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -344,132 +649,175 @@
             );
         };
 
-        const CourseManagement = ({ courses, onAdd, onDelete }) => {
+        const CourseManagement = ({ courses, onUpdateCourses }) => {
             const [isModalOpen, setIsModalOpen] = useState(false);
-            const [formData, setFormData] = useState({ name: '', type: '법정', law: '', cycle: '연간', hours: 1, target: '전사' });
+            const [editMode, setEditMode] = useState(false);
+            const [formData, setFormData] = useState({ id: '', name: '', type: '법정', law: '', cycle: '연간', hours: 1, target: '전사' });
+
+            const openModal = (course = null) => {
+                if (course) { setEditMode(true); setFormData(course); }
+                else { setEditMode(false); setFormData({ id: '', name: '', type: '법정', law: '', cycle: '연간', hours: 1, target: '전사' }); }
+                setIsModalOpen(true);
+            };
+
+            const handleDelete = (id) => {
+                if(confirm("이 과정을 삭제하시겠습니까?")) onUpdateCourses(courses.filter(c => c.id !== id));
+            };
 
             const handleSave = () => {
                 if (!formData.name) return alert("과정명을 입력하세요.");
-                onAdd({ ...formData, riskLevel: 'Low' });
+                let updated;
+                if (editMode) {
+                    updated = courses.map(c => c.id === formData.id ? formData : c);
+                } else {
+                    updated = [...courses, { ...formData, id: `C${Date.now()}`, riskLevel: 'Low' }];
+                }
+                onUpdateCourses(updated);
                 setIsModalOpen(false);
-                setFormData({ name: '', type: '법정', law: '', cycle: '연간', hours: 1, target: '전사' });
             };
 
             return (
-                <div className="glass-panel rounded-2xl p-6 animate-fade-in relative">
-                    <div className="flex justify-between items-center mb-6 border-b pb-4">
+                <div className="glass-panel rounded-2xl animate-fade-in overflow-hidden relative">
+                    <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-white/50">
                         <h2 className="text-xl font-bold text-gray-800">교육 과정 관리</h2>
-                        <button onClick={() => setIsModalOpen(true)} className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-lg">+ 과정 등록</button>
+                        <button onClick={() => openModal()} className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-indigo-700 transition active:scale-95 shadow-lg">+ 과정 등록</button>
                     </div>
-                    <table className="w-full text-sm text-left">
-                        <thead className="bg-gray-50 border-b"><tr><th className="p-4">구분</th><th className="p-4">과정명</th><th className="p-4">법령/근거</th><th className="p-4">주기/시간</th><th className="p-4">대상</th><th className="p-4 text-right">관리</th></tr></thead>
-                        <tbody>{courses.map(c => <tr key={c.id} className="border-b hover:bg-gray-50"><td className="p-4"><StatusBadge status={c.type}/></td><td className="p-4 font-bold text-gray-700">{c.name}</td><td className="p-4 text-gray-500 text-xs">{c.law}</td><td className="p-4 text-gray-600">{c.cycle} / {c.hours}H</td><td className="p-4 text-gray-500">{c.target}</td><td className="p-4 text-right"><button onClick={() => onDelete(c.id)} className="text-rose-500 hover:bg-rose-50 p-2 rounded"><Icons.Trash2 className="w-4 h-4"/></button></td></tr>)}</tbody>
-                    </table>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm text-left">
+                            <thead className="bg-gray-50/50 text-gray-500 border-b border-gray-100"><tr><th className="px-6 py-4">구분</th><th className="px-6 py-4">과정명</th><th className="px-6 py-4">법령/근거</th><th className="px-6 py-4">주기/시간</th><th className="px-6 py-4">대상</th><th className="px-6 py-4 text-right">관리</th></tr></thead>
+                            <tbody className="divide-y divide-gray-50">
+                                {courses.length === 0 ? <tr><td colSpan="6" className="p-8 text-center text-gray-400">등록된 과정이 없습니다.</td></tr> :
+                                courses.map(c => (
+                                    <tr key={c.id} className="hover:bg-indigo-50/30 transition">
+                                        <td className="px-6 py-5"><StatusBadge status={c.type} /></td>
+                                        <td className="px-6 py-5 font-bold text-gray-700">{c.name}</td>
+                                        <td className="px-6 py-5 text-gray-500 text-xs">{c.law}</td>
+                                        <td className="px-6 py-5 text-gray-600 font-medium">{c.cycle} / {c.hours}H</td>
+                                        <td className="px-6 py-5 text-gray-500">{c.target}</td>
+                                        <td className="px-6 py-5 text-right space-x-2">
+                                            <button onClick={() => openModal(c)} className="text-indigo-600 hover:bg-indigo-50 p-2 rounded"><Icons.Edit className="w-4 h-4"/></button>
+                                            <button onClick={() => handleDelete(c.id)} className="text-rose-500 hover:bg-rose-50 p-2 rounded"><Icons.Trash2 className="w-4 h-4"/></button>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
                     
                     {isModalOpen && ReactDOM.createPortal(
-                        <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay" onClick={() => setIsModalOpen(false)}>
-                            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-lg" onClick={e => e.stopPropagation()}>
-                                <h3 className="text-xl font-bold mb-6 border-b pb-4">새 과정 등록</h3>
+                        <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay" onClick={e => e.stopPropagation()}>
+                            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-2xl h-auto" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-xl font-bold mb-6 border-b pb-4 text-gray-800">{editMode ? '과정 수정' : '새 과정 등록'}</h3>
                                 <div className="space-y-4">
-                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">과정명</label><input type="text" className="w-full border p-2.5 rounded-lg" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})}/></div>
-                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">분류</label><select className="w-full border p-2.5 rounded-lg" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})}><option>법정</option><option>직무</option><option>역량</option></select></div>
-                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">관련 법령</label><input type="text" className="w-full border p-2.5 rounded-lg" value={formData.law} onChange={e => setFormData({...formData, law: e.target.value})}/></div>
-                                    <div className="flex gap-4"><div className="flex-1"><label className="block text-sm font-bold text-gray-700 mb-1">주기</label><input type="text" className="w-full border p-2.5 rounded-lg" value={formData.cycle} onChange={e => setFormData({...formData, cycle: e.target.value})}/></div><div className="flex-1"><label className="block text-sm font-bold text-gray-700 mb-1">시간(H)</label><input type="number" className="w-full border p-2.5 rounded-lg" value={formData.hours} onChange={e => setFormData({...formData, hours: e.target.value})}/></div></div>
-                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">대상</label><input type="text" className="w-full border p-2.5 rounded-lg" value={formData.target} onChange={e => setFormData({...formData, target: e.target.value})}/></div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-1">과정명</label>
+                                        <input type="text" placeholder="예: 개인정보보호 교육" className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})}/>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-1">분류</label>
+                                        <select className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})}><option>법정</option><option>직무</option><option>역량</option></select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-1">관련 법령/근거</label>
+                                        <input type="text" placeholder="예: 근로기준법 제76조" className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition" value={formData.law} onChange={e => setFormData({...formData, law: e.target.value})}/>
+                                    </div>
+                                    <div className="flex gap-4">
+                                        <div className="flex-1">
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">주기</label>
+                                            <input type="text" placeholder="예: 연간" className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition" value={formData.cycle} onChange={e => setFormData({...formData, cycle: e.target.value})}/>
+                                        </div>
+                                        <div className="flex-1">
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">시간(H)</label>
+                                            <input type="number" placeholder="1" className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition" value={formData.hours} onChange={e => setFormData({...formData, hours: e.target.value})}/>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-bold text-gray-700 mb-1">교육 대상</label>
+                                        <input type="text" placeholder="예: 전사, 생산직" className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition" value={formData.target} onChange={e => setFormData({...formData, target: e.target.value})}/>
+                                    </div>
                                 </div>
-                                <div className="mt-8 flex space-x-3"><button onClick={() => setIsModalOpen(false)} className="flex-1 py-3 border rounded-xl font-bold">취소</button><button onClick={handleSave} className="flex-1 py-3 bg-indigo-600 text-white rounded-xl font-bold">저장</button></div>
+                                <div className="mt-8 flex space-x-3">
+                                    <button onClick={() => setIsModalOpen(false)} className="flex-1 py-3 border border-gray-300 rounded-xl hover:bg-gray-50 font-bold text-gray-600 transition">취소</button>
+                                    <button onClick={handleSave} className="flex-1 py-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 font-bold shadow-lg transition">저장</button>
+                                </div>
                             </div>
-                        </div>, document.body
+                        </div>,
+                        document.body
                     )}
                 </div>
             );
         };
 
-        const ScheduleManagement = ({ schedules, courses, selectedYear, onAdd, onDelete }) => {
-            const [view, setView] = useState('list');
+        const ScheduleManagement = ({ schedules, courses, onUpdateSchedules, selectedYear }) => {
+            const [view, setView] = useState('month'); 
             const [isModalOpen, setIsModalOpen] = useState(false);
-            const [formData, setFormData] = useState({ courseId: '', date: '', location: '', instructor: '' });
-            const [currentMonth, setCurrentMonth] = useState(new Date().getMonth() + 1);
+            const [formData, setFormData] = useState({ courseId: '', date: '', location: '', instructor: '', status: '예정' });
 
-            const filtered = schedules.filter(s => s.date.startsWith(selectedYear));
+            const filteredSchedules = schedules.filter(s => s.date.startsWith(selectedYear));
+            const validSchedules = filteredSchedules.filter(s => courses.find(c => c.id === s.courseId));
 
-            const handleSave = () => {
-                if (!formData.courseId || !formData.date) return alert("과정과 날짜를 선택하세요.");
-                onAdd({ ...formData, status: '예정' });
+            const daysInMonth = new Date(selectedYear, CUR_MONTH, 0).getDate();
+            const firstDay = new Date(selectedYear, CUR_MONTH - 1, 1).getDay();
+            const days = Array.from({length: daysInMonth}, (_, i) => i + 1);
+
+            const handleAdd = () => {
+                if(!formData.courseId || !formData.date) return alert("과정과 날짜를 선택해주세요.");
+                const selectedCourse = courses.find(c => c.id === formData.courseId);
+                const title = selectedCourse ? selectedCourse.name : "미지정 과정";
+                
+                const newSchedule = {
+                    ...formData,
+                    id: `S${Date.now()}`,
+                    title: title
+                };
+                onUpdateSchedules([...schedules, newSchedule]);
                 setIsModalOpen(false);
-                setFormData({ courseId: '', date: '', location: '', instructor: '' });
+                setFormData({ courseId: '', date: '', location: '', instructor: '', status: '예정' });
             };
 
-            const daysInMonth = new Date(selectedYear, currentMonth, 0).getDate();
-            const firstDayOfWeek = new Date(selectedYear, currentMonth - 1, 1).getDay();
-            
-            const prevMonth = () => setCurrentMonth(prev => prev === 1 ? 12 : prev - 1);
-            const nextMonth = () => setCurrentMonth(prev => prev === 12 ? 1 : prev + 1);
-            
+            const handleDelete = (id) => {
+                if(confirm("이 일정을 삭제하시겠습니까?")) {
+                    onUpdateSchedules(schedules.filter(s => s.id !== id));
+                }
+            };
+
             return (
-                <div className="glass-panel rounded-2xl p-6 animate-fade-in relative h-full flex flex-col">
-                    <div className="flex justify-between items-center mb-6 border-b pb-4 flex-shrink-0">
-                        <h2 className="text-xl font-bold text-gray-800 flex items-center">
-                            {selectedYear}년 교육 일정
-                            {view === 'month' && <span className="ml-2 text-base font-normal text-gray-500">({currentMonth}월)</span>}
-                        </h2>
+                <div className="glass-panel rounded-2xl animate-fade-in relative">
+                    <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-white/50">
+                        <h2 className="text-xl font-bold text-gray-800">{selectedYear}년 {CUR_MONTH}월 교육 일정</h2>
                         <div className="flex gap-2">
-                            <button onClick={() => setIsModalOpen(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow hover:bg-indigo-700 transition">+ 일정 등록</button>
-                            <div className="flex bg-gray-100 p-1 rounded-lg">
-                                <button onClick={() => setView('list')} className={`px-3 py-1 text-sm rounded-md transition ${view==='list'?'bg-white shadow text-indigo-600 font-bold':'text-gray-500'}`}>리스트</button>
-                                <button onClick={() => setView('month')} className={`px-3 py-1 text-sm rounded-md transition ${view==='month'?'bg-white shadow text-indigo-600 font-bold':'text-gray-500'}`}>달력</button>
+                            <button onClick={() => setIsModalOpen(true)} className="bg-indigo-600 text-white px-4 py-1.5 rounded-lg text-sm font-bold hover:bg-indigo-700 shadow-md transition">+ 일정 등록</button>
+                            <div className="flex bg-gray-100 p-1 rounded-xl">
+                                <button onClick={() => setView('month')} className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${view === 'month' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>월간</button>
+                                <button onClick={() => setView('list')} className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${view === 'list' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>리스트</button>
                             </div>
                         </div>
                     </div>
-                    
-                    <div className="flex-1 overflow-y-auto">
-                        {view === 'list' ? (
-                            <div className="grid gap-4">
-                                {filtered.length === 0 ? <div className="text-center py-20 text-gray-400 bg-gray-50 rounded-xl">등록된 일정이 없습니다.</div> :
-                                filtered.map(s => {
-                                    const c = courses.find(course => course.id === s.courseId);
-                                    return <div key={s.id} className="flex justify-between p-5 border rounded-xl bg-white hover:shadow-sm transition">
-                                        <div className="flex gap-4"><div className="bg-slate-100 p-3 rounded-xl text-center min-w-[60px]"><div className="text-xs text-gray-500">{s.date.split('-')[1]}월</div><div className="text-xl font-bold">{s.date.split('-')[2]}</div></div><div><h4 className="font-bold text-lg">{c?.name}</h4><p className="text-sm text-gray-500">{s.location} | {s.instructor}</p></div></div>
-                                        <button onClick={()=>onDelete(s.id)} className="text-rose-500 p-2 hover:bg-rose-50 rounded-full transition"><Icons.Trash2 className="w-5 h-5"/></button>
-                                    </div>
+                    <div className="p-6">
+                        {view === 'month' ? (
+                            <div className="grid grid-cols-7 gap-2">
+                                {['일','월','화','수','목','금','토'].map(d => <div key={d} className="text-center font-bold text-gray-400 py-2">{d}</div>)}
+                                {Array(firstDay).fill(null).map((_, i) => <div key={`empty-${i}`} className="h-32 bg-gray-50/50 rounded-lg"></div>)}
+                                {days.map(day => {
+                                    const dateStr = `${selectedYear}-${String(CUR_MONTH).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+                                    const events = validSchedules.filter(s => s.date === dateStr);
+                                    return (
+                                        <div key={day} className="h-32 border border-gray-100 rounded-lg p-2 hover:bg-white transition relative">
+                                            <div className="text-sm font-bold text-gray-700 mb-1">{day}</div>
+                                            {events.map(ev => (
+                                                <div key={ev.id} className="text-xs bg-indigo-100 text-indigo-700 p-1 rounded mb-1 truncate cursor-pointer hover:bg-indigo-200" onClick={() => handleDelete(ev.id)}>
+                                                    {ev.title}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    );
                                 })}
                             </div>
                         ) : (
-                            <div className="animate-fade-in h-full flex flex-col">
-                                <div className="flex justify-between items-center mb-4 px-2">
-                                    <button onClick={prevMonth} className="p-2 hover:bg-gray-100 rounded-full transition"><Icons.ChevronRight className="w-5 h-5 transform rotate-180 text-gray-600"/></button>
-                                    <span className="font-bold text-lg text-gray-800">{currentMonth}월</span>
-                                    <button onClick={nextMonth} className="p-2 hover:bg-gray-100 rounded-full transition"><Icons.ChevronRight className="w-5 h-5 text-gray-600"/></button>
-                                </div>
-                                <div className="grid grid-cols-7 gap-2 mb-2 text-center">
-                                    {['일','월','화','수','목','금','토'].map((d,i) => <div key={d} className={`text-xs font-bold py-2 ${i===0?'text-rose-500':i===6?'text-blue-500':'text-gray-500'}`}>{d}</div>)}
-                                </div>
-                                <div className="grid grid-cols-7 gap-2 flex-1 auto-rows-fr">
-                                    {Array.from({length: firstDayOfWeek}).map((_, i) => <div key={`empty-${i}`} className="bg-gray-50/30 rounded-lg"></div>)}
-                                    {Array.from({length: daysInMonth}).map((_, i) => {
-                                        const day = i + 1;
-                                        const dateStr = `${selectedYear}-${String(currentMonth).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-                                        const dayEvents = filtered.filter(s => s.date === dateStr);
-                                        const isToday = new Date().toDateString() === new Date(selectedYear, currentMonth-1, day).toDateString();
-                                        
-                                        return (
-                                            <div key={day} className={`border ${isToday ? 'border-indigo-500 bg-indigo-50/30' : 'border-gray-100 bg-white'} rounded-lg p-2 min-h-[100px] relative hover:border-indigo-300 transition group`}>
-                                                <div className={`text-xs font-bold mb-1 ${isToday?'text-indigo-600':''}`}>{day}</div>
-                                                <div className="space-y-1 overflow-y-auto max-h-[80px]">
-                                                    {dayEvents.map(ev => {
-                                                        const c = courses.find(course => course.id === ev.courseId);
-                                                        return (
-                                                            <div key={ev.id} className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-1 rounded border border-indigo-200 truncate relative group/item" title={`${c?.name} (${ev.instructor})`}>
-                                                                {c?.name}
-                                                                <button onClick={(e)=>{e.stopPropagation(); onDelete(ev.id);}} className="absolute right-0 top-0 bottom-0 px-1 bg-indigo-200 text-rose-600 opacity-0 group-hover/item:opacity-100 font-bold">×</button>
-                                                            </div>
-                                                        )
-                                                    })}
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
+                            <div className="grid gap-4">
+                                {validSchedules.length === 0 ? <div className="text-center p-10 text-gray-400">등록된 일정이 없습니다.</div> :
+                                validSchedules.map(s => <div key={s.id} className="flex justify-between p-5 bg-white border border-gray-100 rounded-2xl hover:border-indigo-200 group relative">
+                                    <div className="flex space-x-5"><div className="text-center w-16 p-2 bg-slate-50 rounded-xl"><div className="text-xs text-gray-500">{s.date.split('-')[1]}월</div><div className="text-xl font-bold">{s.date.split('-')[2]}</div></div><div><h4 className="font-bold text-lg">{s.title}</h4><p className="text-sm text-gray-500">{s.location} | {s.instructor}</p></div></div><div className="text-right flex items-center gap-2"><StatusBadge status={s.status} /><button onClick={()=>handleDelete(s.id)} className="text-red-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition"><Icons.Trash2 className="w-4 h-4"/></button></div></div>)}
                             </div>
                         )}
                     </div>
@@ -477,216 +825,378 @@
                     {isModalOpen && ReactDOM.createPortal(
                         <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay" onClick={() => setIsModalOpen(false)}>
                             <div className="bg-white rounded-2xl shadow-2xl p-8 w-96" onClick={e => e.stopPropagation()}>
-                                <h3 className="font-bold text-lg mb-6">새 일정 등록</h3>
+                                <h3 className="text-lg font-bold mb-6">새 교육 일정 등록</h3>
                                 <div className="space-y-4">
-                                    <div><label className="block text-sm font-bold mb-1">과정</label><select className="w-full border p-2 rounded" value={formData.courseId} onChange={e=>setFormData({...formData, courseId: e.target.value})}><option value="">선택하세요</option>{courses.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
-                                    <div><label className="block text-sm font-bold mb-1">날짜</label><input type="date" className="w-full border p-2 rounded" value={formData.date} onChange={e=>setFormData({...formData, date: e.target.value})}/></div>
-                                    <div><label className="block text-sm font-bold mb-1">장소</label><input type="text" className="w-full border p-2 rounded" value={formData.location} onChange={e=>setFormData({...formData, location: e.target.value})}/></div>
-                                    <div><label className="block text-sm font-bold mb-1">강사</label><input type="text" className="w-full border p-2 rounded" value={formData.instructor} onChange={e=>setFormData({...formData, instructor: e.target.value})}/></div>
+                                    <label className="block text-sm font-bold text-gray-700">교육 과정 선택 (필수)</label>
+                                    <select className="w-full border p-2 rounded" value={formData.courseId} onChange={e => setFormData({...formData, courseId: e.target.value})}>
+                                        <option value="">과정을 선택하세요</option>
+                                        {courses.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                                    </select>
+                                    
+                                    <label className="block text-sm font-bold text-gray-700">날짜</label>
+                                    <input type="date" className="w-full border p-2 rounded" value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})}/>
+                                    
+                                    <label className="block text-sm font-bold text-gray-700">장소</label>
+                                    <input type="text" className="w-full border p-2 rounded" placeholder="예: 1연수실" value={formData.location} onChange={e => setFormData({...formData, location: e.target.value})}/>
+                                    
+                                    <label className="block text-sm font-bold text-gray-700">강사</label>
+                                    <input type="text" className="w-full border p-2 rounded" placeholder="강사명" value={formData.instructor} onChange={e => setFormData({...formData, instructor: e.target.value})}/>
                                 </div>
-                                <div className="mt-6 flex gap-3"><button onClick={() => setIsModalOpen(false)} className="flex-1 py-2 border rounded font-bold">취소</button><button onClick={handleSave} className="flex-1 py-2 bg-indigo-600 text-white rounded font-bold">등록</button></div>
+                                <div className="mt-6 flex space-x-3"><button onClick={() => setIsModalOpen(false)} className="flex-1 py-2 border rounded hover:bg-gray-50">취소</button><button onClick={handleAdd} className="flex-1 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">등록</button></div>
                             </div>
-                        </div>, document.body
+                        </div>,
+                        document.body
                     )}
                 </div>
             );
         };
 
         const ComplianceManager = ({ courses }) => (
-            <div className="glass-panel rounded-2xl p-6 animate-fade-in">
-                <h2 className="text-xl font-bold mb-4 flex items-center"><Icons.ShieldAlert className="w-5 h-5 mr-2 text-rose-600"/>법정 의무교육 모니터링</h2>
-                <table className="w-full text-sm">
-                    <thead><tr><th className="text-left p-2">과정명</th><th className="text-left p-2">위험도</th></tr></thead>
-                    <tbody>{courses.filter(c => c.type === '법정').map(c => <tr key={c.id} className="border-b"><td className="p-2">{c.name}</td><td className="p-2"><StatusBadge status={c.riskLevel || 'Low'}/></td></tr>)}</tbody>
-                </table>
+             <div className="glass-panel rounded-2xl animate-fade-in">
+                <div className="p-6 border-b border-gray-100 bg-rose-50/30">
+                    <h2 className="text-xl font-bold text-gray-800 flex items-center"><div className="bg-rose-100 p-2 rounded-lg mr-3"><Icons.ShieldAlert className="w-5 h-5 text-rose-600"/></div>법정 의무교육 모니터링</h2>
+                </div>
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm text-left">
+                        <thead className="bg-gray-50/80 border-b border-gray-100"><tr><th className="px-6 py-4 font-semibold text-gray-600">법정 과정명</th><th className="px-6 py-4 font-semibold text-gray-600">근거 법령</th><th className="px-6 py-4 font-semibold text-center text-gray-600">이수 현황</th><th className="px-6 py-4 font-semibold text-center text-gray-600">리스크 관리</th></tr></thead>
+                        <tbody className="divide-y divide-gray-50">
+                            {courses.filter(c => c.type === '법정').length === 0 ? <tr><td colSpan="4" className="p-8 text-center text-gray-400">등록된 법정 교육 과정이 없습니다.</td></tr> :
+                            courses.filter(c => c.type === '법정').map(c => (
+                                <tr key={c.id} className="hover:bg-rose-50/20 transition">
+                                    <td className="px-6 py-5 font-bold text-gray-700">{c.name}</td>
+                                    <td className="px-6 py-5 text-xs text-gray-500">{c.law}</td>
+                                    <td className="px-6 py-5 text-center"><div className="w-32 mx-auto bg-gray-100 rounded-full h-2 mb-2 overflow-hidden"><div className={`h-full rounded-full ${c.riskLevel === 'High' ? 'bg-rose-500' : 'bg-emerald-500'}`} style={{width: c.riskLevel === 'High' ? '60%' : '90%'}}></div></div><span className={`text-xs font-bold ${c.riskLevel === 'High' ? 'text-rose-500' : 'text-emerald-600'}`}>{c.riskLevel === 'High' ? '60% (저조)' : '90% (안정)'}</span></td>
+                                    <td className="px-6 py-5 text-center"><StatusBadge status={c.riskLevel} /></td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
             </div>
         );
 
-        const EmployeeManager = ({ employees, onSelect }) => {
+        const EmployeeManager = ({ employees, onSelect, onUpdateEmployees }) => {
             const [search, setSearch] = useState('');
-            const filtered = employees.filter(e => e.name?.includes(search) || e.dept?.includes(search));
+            const [selectedIds, setSelectedIds] = useState(new Set());
+            const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+            const [editTarget, setEditTarget] = useState(null);
+            const [viewMode, setViewMode] = useState('list');
+            const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+            const [newEmpData, setNewEmpData] = useState({ name: '', dept: '', position: '', joinDate: '' });
+            
+            const filtered = employees.filter(e => e.name.includes(search) || e.dept.includes(search));
+            const toggleSelectAll = () => selectedIds.size === filtered.length ? setSelectedIds(new Set()) : setSelectedIds(new Set(filtered.map(e => e.id)));
+            const toggleSelect = (id, e) => { e.stopPropagation(); const newSet = new Set(selectedIds); newSet.has(id) ? newSet.delete(id) : newSet.add(id); setSelectedIds(newSet); };
+
+            const handleBulkDelete = () => {
+                if(selectedIds.size === 0) return;
+                if(confirm(`선택한 ${selectedIds.size}명의 사원 정보를 삭제하시겠습니까?`)) {
+                    const remaining = employees.filter(e => !selectedIds.has(e.id));
+                    onUpdateEmployees(remaining);
+                    setSelectedIds(new Set());
+                    alert("삭제되었습니다.");
+                }
+            };
+
+            const handleExcelUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = (evt) => {
+                    try {
+                        const bstr = evt.target.result;
+                        const wb = XLSX.read(bstr, {type:'binary'});
+                        const wsname = wb.SheetNames[0];
+                        const ws = wb.Sheets[wsname];
+                        const data = XLSX.utils.sheet_to_json(ws, {header:1}); 
+
+                        if(data.length < 2) { alert('데이터가 없는 엑셀 파일입니다.'); return; }
+
+                        const headers = data[0];
+                        const idxName = headers.findIndex(h => h && (h.includes('이름') || h.toLowerCase().includes('name')));
+                        const idxDept = headers.findIndex(h => h && (h.includes('부서') || h.toLowerCase().includes('dept')));
+                        const idxPos = headers.findIndex(h => h && (h.includes('직급') || h.toLowerCase().includes('position')));
+
+                        let newEmployees = [];
+                        let startId = employees.length > 0 ? parseInt(employees[employees.length-1].id.replace(CUR_YEAR, '')) + 1 : 1;
+
+                        for(let i=1; i<data.length; i++) {
+                            const row = data[i];
+                            if(!row || row.length === 0) continue;
+                            
+                            const name = idxName > -1 ? row[idxName] : row[0];
+                            const dept = idxDept > -1 ? row[idxDept] : row[1];
+                            const position = idxPos > -1 ? row[idxPos] : row[2];
+
+                            if(name) {
+                                newEmployees.push({
+                                    id: `${CUR_YEAR}${String(startId++).padStart(3,'0')}`,
+                                    name: name,
+                                    dept: dept || '미배정',
+                                    position: position || '사원',
+                                    status: '재직',
+                                    riskScore: 0,
+                                    complianceRate: 0
+                                });
+                            }
+                        }
+
+                        if(newEmployees.length > 0) {
+                            onUpdateEmployees([...employees, ...newEmployees]);
+                            alert(`총 ${newEmployees.length}명의 사원이 성공적으로 등록되었습니다.`);
+                        } else {
+                            alert('등록할 사원 정보를 찾지 못했습니다. 엑셀 형식을 확인해주세요.');
+                        }
+                    } catch (error) {
+                        console.error(error);
+                        alert("엑셀 파일 읽기 오류! 파일을 확인해주세요.");
+                    }
+                };
+                reader.readAsBinaryString(file);
+                e.target.value = ''; 
+            };
+
+            const handleAddEmployee = (e) => {
+                e.preventDefault();
+                if(!newEmpData.name) return alert('이름을 입력해주세요.');
+
+                let startId = employees.length > 0 ? parseInt(employees[employees.length-1].id.replace(CUR_YEAR, '')) + 1 : 1;
+                const newEmp = {
+                    id: `${CUR_YEAR}${String(startId).padStart(3,'0')}`,
+                    name: newEmpData.name,
+                    dept: newEmpData.dept || '미배정',
+                    position: newEmpData.position || '사원',
+                    status: '재직',
+                    riskScore: 0,
+                    complianceRate: 0,
+                    joinDate: newEmpData.joinDate
+                };
+
+                onUpdateEmployees([...employees, newEmp]);
+                setIsAddModalOpen(false);
+                setNewEmpData({ name: '', dept: '', position: '', joinDate: '' });
+                alert('사원이 등록되었습니다.');
+            };
+
+
+            const handleSaveEdit = () => {
+                const updated = employees.map(emp => emp.id === editTarget.id ? editTarget : emp);
+                onUpdateEmployees(updated);
+                setIsEditModalOpen(false);
+                alert("수정되었습니다.");
+            };
+
+            const renderOrgView = () => {
+                const deptGroups = filtered.reduce((acc, emp) => {
+                    if (!acc[emp.dept]) acc[emp.dept] = [];
+                    acc[emp.dept].push(emp);
+                    return acc;
+                }, {});
+
+                return (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 p-4">
+                        {Object.keys(deptGroups).length === 0 ? (
+                            <div className="col-span-3 text-center text-gray-400 py-10">데이터가 없습니다.</div>
+                        ) : (
+                            Object.entries(deptGroups).map(([deptName, members]) => (
+                                <div key={deptName} className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 hover:shadow-md transition">
+                                    <div className="flex justify-between items-center border-b pb-3 mb-3">
+                                        <h3 className="font-bold text-lg text-gray-800">{deptName}</h3>
+                                        <span className="bg-indigo-50 text-indigo-600 text-xs font-bold px-2 py-1 rounded-full">{members.length}명</span>
+                                    </div>
+                                    <div className="space-y-2 max-h-60 overflow-y-auto custom-scrollbar">
+                                        {members.map(emp => (
+                                            <div key={emp.id} 
+                                                 onClick={() => onSelect(emp.id)}
+                                                 className="flex items-center justify-between p-2 hover:bg-gray-50 rounded cursor-pointer group">
+                                                <div className="flex items-center">
+                                                    <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-500 text-xs font-bold mr-3">{emp.name[0]}</div>
+                                                    <div>
+                                                        <p className="text-sm font-medium text-gray-800">{emp.name}</p>
+                                                        <p className="text-xs text-gray-400">{emp.position}</p>
+                                                    </div>
+                                                </div>
+                                                <button onClick={(e) => { e.stopPropagation(); setEditTarget({...emp}); setIsEditModalOpen(true); }} className="text-gray-300 hover:text-indigo-600 opacity-0 group-hover:opacity-100 transition">
+                                                    <Icons.Edit className="w-4 h-4" />
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                );
+            };
+
             return (
-                <div className="glass-panel rounded-2xl p-6 animate-fade-in flex flex-col h-full">
-                    <div className="flex justify-between items-center mb-4">
-                        <h2 className="text-lg font-bold flex items-center"><span className="w-2 h-2 bg-green-500 rounded-full mr-2"></span>HR PRO 연동됨 (읽기 전용)</h2>
-                        <input type="text" placeholder="검색..." className="border p-2 rounded" onChange={e => setSearch(e.target.value)}/>
+                <div className="glass-panel rounded-2xl animate-fade-in flex flex-col h-full overflow-hidden relative">
+                    <div className="p-6 border-b border-gray-100 flex flex-col md:flex-row justify-between items-center bg-white/50 gap-4">
+                        <div className="flex items-center space-x-4 w-full md:w-auto">
+                            <h2 className="text-xl font-bold text-gray-800">전사 사원 관리</h2>
+                            <div className="flex bg-gray-100 p-1 rounded-lg">
+                                <button 
+                                    onClick={() => setViewMode('list')} 
+                                    className={`px-3 py-1 text-xs font-bold rounded-md transition ${viewMode === 'list' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                                >
+                                    <div className="flex items-center"><Icons.List className="w-3 h-3 mr-1"/>목록형</div>
+                                </button>
+                                <button 
+                                    onClick={() => setViewMode('org')} 
+                                    className={`px-3 py-1 text-xs font-bold rounded-md transition ${viewMode === 'org' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                                >
+                                    <div className="flex items-center"><Icons.Grid className="w-3 h-3 mr-1"/>조직도형</div>
+                                </button>
+                            </div>
+                            {selectedIds.size > 0 && <button onClick={handleBulkDelete} className="bg-rose-50 text-rose-600 px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-rose-100 flex items-center transition"><Icons.Trash2 className="w-3 h-3 mr-1"/> {selectedIds.size}명 삭제</button>}
+                        </div>
+                        <div className="flex items-center space-x-2 w-full md:w-auto justify-end">
+                            <div className="relative group"><Icons.Search className="w-4 h-4 absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 group-hover:text-indigo-500 transition-colors" /><input type="text" placeholder="이름/부서 검색..." className="pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-100 focus:border-indigo-400 w-40 md:w-56 transition shadow-sm" value={search} onChange={e => setSearch(e.target.value)} /></div>
+                            <button onClick={() => setIsAddModalOpen(true)} className="bg-indigo-600 text-white px-3 py-2 rounded-xl text-sm font-semibold hover:bg-indigo-700 transition shadow-lg shadow-indigo-200 flex items-center">
+                                <Icons.Plus className="w-4 h-4 mr-1"/> 등록
+                            </button>
+                            <label className="bg-emerald-600 text-white px-3 py-2 rounded-xl text-sm font-semibold hover:bg-emerald-700 transition cursor-pointer shadow-lg shadow-emerald-200 flex items-center"><Icons.Upload className="w-4 h-4 mr-1"/> 엑셀<input type="file" accept=".xlsx, .xls" className="hidden" onChange={handleExcelUpload}/></label>
+                        </div>
                     </div>
-                    <div className="overflow-auto flex-1">
-                        <table className="w-full text-sm text-left">
-                            <thead className="bg-gray-50 sticky top-0"><tr><th className="p-3">이름</th><th className="p-3">부서</th><th className="p-3">직급</th><th className="p-3 text-right">관리</th></tr></thead>
-                            <tbody>{filtered.map(e => <tr key={e.id} className="border-b hover:bg-gray-50"><td className="p-3 font-bold">{e.name}</td><td className="p-3">{e.dept}</td><td className="p-3">{e.position}</td><td className="p-3 text-right"><button onClick={()=>onSelect(e.id)} className="text-indigo-600 border px-2 py-1 rounded hover:bg-indigo-50 transition">상세</button></td></tr>)}</tbody>
-                        </table>
+                    
+                    <div className="overflow-x-auto flex-1 bg-white/30">
+                        {viewMode === 'list' ? (
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-gray-50/80 text-gray-500 border-b border-gray-100"><tr><th className="px-6 py-4 w-12"><input type="checkbox" className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" checked={selectedIds.size === filtered.length && filtered.length > 0} onChange={toggleSelectAll}/></th><th className="px-6 py-4 font-semibold">이름/직급</th><th className="px-6 py-4 font-semibold">부서</th><th className="px-6 py-4 font-semibold">상태</th><th className="px-6 py-4 font-semibold">법정교육 이수율</th><th className="px-6 py-4 text-right font-semibold">관리</th></tr></thead>
+                                <tbody className="divide-y divide-gray-50">
+                                    {filtered.length === 0 ? <tr><td colSpan="6" className="p-8 text-center text-gray-400">데이터가 없습니다.</td></tr> : 
+                                    filtered.map(e => (<tr key={e.id} className={`hover:bg-indigo-50/40 cursor-pointer transition duration-150 ${selectedIds.has(e.id) ? 'bg-indigo-50/30' : ''}`} onClick={() => onSelect(e.id)}><td className="px-6 py-4" onClick={(ev) => ev.stopPropagation()}><input type="checkbox" className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500" checked={selectedIds.has(e.id)} onChange={(ev) => toggleSelect(e.id, ev)}/></td><td className="px-6 py-4 font-medium flex items-center"><div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-100 to-violet-100 text-indigo-600 flex items-center justify-center mr-4 text-sm font-bold shadow-sm">{e.name[0]}</div><div><div className="text-gray-900 font-bold">{e.name}</div><div className="text-gray-400 text-xs mt-0.5">{e.position}</div></div></td><td className="px-6 py-4 text-gray-600">{e.dept}</td><td className="px-6 py-4"><StatusBadge status={e.status} /></td><td className="px-6 py-4"><div className="flex items-center"><div className="w-24 bg-gray-100 rounded-full h-2 mr-3 overflow-hidden"><div className={`h-full rounded-full ${e.complianceRate < 90 ? 'bg-rose-500' : 'bg-emerald-500'}`} style={{width: `${e.complianceRate}%`}}></div></div><span className={`text-xs font-bold ${e.complianceRate < 90 ? 'text-rose-500' : 'text-gray-600'}`}>{e.complianceRate}%</span></div></td><td className="px-6 py-4 text-right"><div className="flex items-center justify-end space-x-2"><button onClick={(ev) => {ev.stopPropagation(); setEditTarget({...e}); setIsEditModalOpen(true);}} className="p-2 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition"><Icons.Edit className="w-4 h-4"/></button><button className="text-indigo-600 hover:text-white hover:bg-indigo-600 text-xs border border-indigo-200 px-3 py-1.5 rounded-lg flex items-center transition-all duration-200">상세 <Icons.ChevronRight className="w-3 h-3 ml-1"/></button></div></td></tr>))}
+                                </tbody>
+                            </table>
+                        ) : (
+                            renderOrgView()
+                        )}
                     </div>
+
+                    {isEditModalOpen && editTarget && ReactDOM.createPortal(
+                        <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay" onClick={(e) => e.stopPropagation()}>
+                            <div className="bg-white rounded-2xl shadow-2xl p-8 w-96 border border-gray-100" onClick={e => e.stopPropagation()}>
+                                <div className="flex justify-between items-center mb-6">
+                                    <h3 className="text-lg font-bold text-gray-800">사원 정보 수정</h3>
+                                    <button onClick={() => setIsEditModalOpen(false)} className="text-gray-400 hover:text-gray-600"><Icons.X className="w-5 h-5"/></button>
+                                </div>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="text-xs font-bold text-gray-500">이름</label>
+                                        <input type="text" value={editTarget.name} onChange={e=>setEditTarget({...editTarget, name: e.target.value})} className="w-full border rounded p-2 text-sm"/>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-bold text-gray-500">부서</label>
+                                        <input type="text" value={editTarget.dept} onChange={e=>setEditTarget({...editTarget, dept: e.target.value})} className="w-full border rounded p-2 text-sm"/>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-bold text-gray-500">직급</label>
+                                        <input type="text" value={editTarget.position} onChange={e=>setEditTarget({...editTarget, position: e.target.value})} className="w-full border rounded p-2 text-sm"/>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-bold text-gray-500">상태</label>
+                                        <select value={editTarget.status} onChange={e=>setEditTarget({...editTarget, status: e.target.value})} className="w-full border rounded p-2 text-sm">
+                                            <option value="재직">재직</option>
+                                            <option value="휴직">휴직</option>
+                                            <option value="퇴사">퇴사</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div className="mt-8 flex space-x-3">
+                                    <button onClick={() => setIsEditModalOpen(false)} className="flex-1 py-2.5 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-bold">취소</button>
+                                    <button onClick={handleSaveEdit} className="flex-1 py-2.5 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 text-sm font-bold shadow-lg shadow-indigo-200">저장</button>
+                                </div>
+                            </div>
+                        </div>,
+                        document.body
+                    )}
+                    
+                    {isAddModalOpen && ReactDOM.createPortal(
+                        <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay" onClick={() => setIsAddModalOpen(false)}>
+                            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-2xl h-auto border border-gray-100" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-xl font-bold text-gray-800 mb-6 border-b pb-4">새 사원 등록</h3>
+                                <form onSubmit={handleAddEmployee} className="space-y-4">
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">이름</label>
+                                            <input type="text" required value={newEmpData.name} onChange={e=>setNewEmpData({...newEmpData, name: e.target.value})} className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition" placeholder="이름 입력"/>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">입사일</label>
+                                            <input type="date" value={newEmpData.joinDate} onChange={e=>setNewEmpData({...newEmpData, joinDate: e.target.value})} className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition"/>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">부서</label>
+                                            <input type="text" value={newEmpData.dept} onChange={e=>setNewEmpData({...newEmpData, dept: e.target.value})} className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition" placeholder="예: 인사팀"/>
+                                        </div>
+                                        <div>
+                                            <label className="block text-sm font-bold text-gray-700 mb-1">직급</label>
+                                            <input type="text" value={newEmpData.position} onChange={e=>setNewEmpData({...newEmpData, position: e.target.value})} className="w-full border border-gray-300 p-2.5 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none transition" placeholder="예: 사원"/>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="mt-8 flex space-x-3 pt-4 border-t border-gray-100">
+                                        <button type="button" onClick={() => setIsAddModalOpen(false)} className="flex-1 py-3 border border-gray-300 rounded-xl hover:bg-gray-50 font-bold text-gray-600 transition">취소</button>
+                                        <button type="submit" className="flex-1 py-3 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 font-bold shadow-lg transition">등록하기</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>,
+                        document.body
+                    )}
                 </div>
             );
         };
 
-        const EmployeeHistory = ({ employees, records, courses, selectedId, onSelectEmployee, onBack, onAddRecord, onDeleteRecord }) => {
-            const [isModalOpen, setIsModalOpen] = useState(false);
-            const [form, setForm] = useState({ courseId: '', date: '', score: 0, status: '이수' });
-            const [searchTerm, setSearchTerm] = useState('');
-
-            if (!selectedId) {
-                const filtered = employees.filter(e => e.name.includes(searchTerm) || e.dept.includes(searchTerm));
-                return (
-                    <div className="glass-panel rounded-2xl p-8 animate-fade-in h-full flex flex-col">
-                        <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center">
-                            <Icons.Search className="w-6 h-6 mr-2 text-indigo-600"/>
-                            개인 이력 조회 대상 선택
-                        </h3>
-                        <div className="relative mb-4">
-                            <Icons.Search className="w-4 h-4 absolute left-3 top-3 text-gray-400"/>
-                            <input 
-                                type="text" 
-                                placeholder="이름 또는 부서 검색..." 
-                                className="w-full pl-10 pr-4 py-2 border rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none bg-gray-50"
-                                value={searchTerm}
-                                onChange={e => setSearchTerm(e.target.value)}
-                            />
-                        </div>
-                        <div className="flex-1 overflow-y-auto">
-                            <table className="w-full text-sm text-left">
-                                <thead className="bg-gray-50 sticky top-0"><tr><th className="p-3">이름</th><th className="p-3">부서</th><th className="p-3 text-right">선택</th></tr></thead>
-                                <tbody>
-                                    {filtered.map(e => (
-                                        <tr key={e.id} className="border-b hover:bg-gray-50 cursor-pointer transition" onClick={() => onSelectEmployee(e.id)}>
-                                            <td className="p-3 font-bold text-gray-800">{e.name} <span className="text-xs text-gray-400 font-normal">({e.position})</span></td>
-                                            <td className="p-3 text-gray-600">{e.dept}</td>
-                                            <td className="p-3 text-right"><button className="text-indigo-600 bg-indigo-50 px-3 py-1 rounded-lg text-xs font-bold hover:bg-indigo-100">조회</button></td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                );
-            }
-
-            const emp = employees.find(e => e.id === selectedId);
-            if (!emp) return <div className="p-10 text-center">사원 정보를 찾을 수 없습니다. <button onClick={onBack} className="text-indigo-600 underline">목록으로</button></div>;
-            const empRecords = records.filter(r => r.empId === emp.id);
-
-            const handleAdd = () => {
-                if(!form.courseId) return alert("과정 선택 필수");
-                onAddRecord({ ...form, empId: emp.id, evidence: true });
-                setIsModalOpen(false);
-            };
-
-            return (
-                 <div className="glass-panel rounded-2xl p-8 animate-fade-in max-w-5xl mx-auto">
-                    <button onClick={onBack} className="mb-6 text-sm text-gray-500 flex items-center hover:text-indigo-600 font-bold transition"><Icons.ChevronRight className="w-4 h-4 transform rotate-180 mr-1"/> 다른 사원 조회하기</button>
-                    <div className="flex justify-between items-center mb-8 pb-8 border-b border-gray-100">
-                        <div className="flex items-center space-x-6">
-                            <div className="w-20 h-20 rounded-2xl bg-slate-200 flex items-center justify-center text-3xl font-bold text-slate-600">{emp.name?.[0]}</div>
-                            <div><h2 className="text-3xl font-bold text-gray-900">{emp.name}</h2><p className="text-gray-500">{emp.dept} | {emp.id}</p></div>
-                        </div>
-                        <button onClick={() => setIsModalOpen(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow hover:bg-indigo-700 transition">+ 이력 추가</button>
-                    </div>
-                    <div className="space-y-4">
-                        {empRecords.map(r => {
-                            const course = courses.find(c => c.id === r.courseId) || { name: '삭제된 과정', type: '-' };
-                            return (
-                                <div key={r.id} className="flex justify-between items-center p-5 bg-white border border-gray-100 rounded-xl hover:shadow-sm transition">
-                                    <div><div className="flex items-center space-x-3 mb-1"><StatusBadge status={course.type} /><span className="font-bold text-gray-800 text-lg">{course.name}</span></div><div className="text-sm text-gray-500">완료: {r.date} | 점수: {r.score}</div></div>
-                                    <div className="flex items-center space-x-3"><StatusBadge status={r.status} /><button onClick={() => onDeleteRecord(r.id)} className="text-rose-500 p-2 hover:bg-rose-50 rounded-full transition"><Icons.Trash2 className="w-4 h-4"/></button></div>
-                                </div>
-                            )
-                        })}
-                        {empRecords.length === 0 && <div className="text-center py-10 text-gray-400 bg-gray-50 rounded-xl">등록된 이수 내역이 없습니다.</div>}
-                    </div>
-                    {isModalOpen && ReactDOM.createPortal(
-                        <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay" onClick={() => setIsModalOpen(false)}>
-                            <div className="bg-white rounded-2xl shadow-xl w-96" onClick={e => e.stopPropagation()}>
-                                <h3 className="font-bold text-lg mb-4">이력 등록</h3>
-                                <select className="w-full border p-2 rounded mb-2" onChange={e => setForm({...form, courseId: e.target.value})}>
-                                    <option value="">과정 선택</option>{courses.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                                </select>
-                                <input type="date" className="w-full border p-2 rounded mb-2" onChange={e => setForm({...form, date: e.target.value})}/>
-                                <button onClick={handleAdd} className="w-full bg-indigo-600 text-white py-2 rounded font-bold hover:bg-indigo-700 transition">등록</button>
-                            </div>
-                        </div>, document.body
-                    )}
-                 </div>
-            );
-        };
-
         // --- Main App ---
-        const App = () => {
+        function App() {
             const [activeTab, setActiveTab] = useState('dashboard');
             const [selectedYear, setSelectedYear] = useState(String(CUR_YEAR));
             const [data, setData] = useState({ courses: [], schedules: [], employees: [], records: [], analytics: [] });
+            const [isOnline, setIsOnline] = useState(navigator.onLine);
             const [selectedEmpId, setSelectedEmpId] = useState(null);
-            
-            // 진단 모드 상태
-            const [showStatusModal, setShowStatusModal] = useState(false);
-            const [status, setStatus] = useState({ hrAuth: false, masterAuth: false, masterConfig: isMasterConfigValid });
-            const [authErrors, setAuthErrors] = useState({ hr: null, master: null });
-            const [activeCollection, setActiveCollection] = useState(null); 
-            const [scanLog, setScanLog] = useState([]); // 탐색 로그 저장용
+            const [initLoaded, setInitLoaded] = useState(false);
 
-            // 1. 인증 확인
             useEffect(() => {
-                const unsubAuthHR = getAuth(appHR).onAuthStateChanged(u => setStatus(s => ({...s, hrAuth: !!u})));
-                signInAnonymously(getAuth(appHR)).catch(e => setAuthErrors(prev => ({...prev, hr: e.code})));
-                const unsubAuthMaster = getAuth(appMaster).onAuthStateChanged(u => setStatus(s => ({...s, masterAuth: !!u})));
-                signInAnonymously(getAuth(appMaster)).catch(e => setAuthErrors(prev => ({...prev, master: e.code})));
-                return () => { unsubAuthHR(); unsubAuthMaster(); };
-            }, []);
+                let unsubscribeEmployees = () => {};
 
-            // 2. 데이터 연동 로직
-            useEffect(() => {
-                const addLog = (msg) => setScanLog(prev => [...prev, msg]);
-                const detectAndSubscribe = async () => {
-                    if (activeCollection) return;
-                    addLog("🚀 AI 딥 스캔 시작...");
-                    let found = false;
-                    for (const colName of SEARCH_CANDIDATES) {
-                        try {
-                            const q = query(collection(dbHR, colName), limit(1));
-                            const snapshot = await getDocs(q);
-                            if (!snapshot.empty) {
-                                setActiveCollection(colName);
-                                found = true;
-                                onSnapshot(collection(dbHR, colName), (snap) => {
-                                    const safeEmployees = snap.docs.map(d => convertToEmployee(d));
-                                    safeEmployees.sort((a, b) => a.name.localeCompare(b.name, 'ko'));
-                                    setData(prev => ({ ...prev, employees: safeEmployees }));
-                                });
-                                break;
-                            }
-                        } catch (e) {}
-                    }
-                    if (!found && TARGET_APP_ID) {
-                        for (const colName of SEARCH_CANDIDATES) {
-                            try {
-                                const deepPath = collection(dbHR, "artifacts", TARGET_APP_ID, "public", "data", colName);
-                                const snapshot = await getDocs(query(deepPath, limit(1)));
-                                if (!snapshot.empty) {
-                                    setActiveCollection(deepPath.path);
-                                    found = true;
-                                    onSnapshot(deepPath, (snap) => {
-                                        const safeEmployees = snap.docs.map(d => convertToEmployee(d));
-                                        safeEmployees.sort((a, b) => a.name.localeCompare(b.name, 'ko'));
-                                        setData(prev => ({ ...prev, employees: safeEmployees }));
-                                    });
-                                    break;
-                                }
-                            } catch (e) {}
-                        }
+                const init = async () => {
+                    const empty = generateEmptyData();
+                    const c = await DataManager.loadLocal('courses', () => empty.courses);
+                    const s = await DataManager.loadLocal('schedules', () => empty.schedules);
+                    const r = await DataManager.loadLocal('records', () => empty.records);
+                    const a = await DataManager.loadLocal('analytics', () => empty.analytics);
+                    let e = await DataManager.loadLocal('employees', () => empty.employees);
+                    
+                    setData({ courses: c, schedules: s, employees: e, records: r, analytics: a });
+                    setInitLoaded(true);
+
+                    if (isFirebaseAvailable) {
+                        unsubscribeEmployees = await DataManager.subscribeToEmployees((newEmployees) => {
+                            setData(prev => ({ ...prev, employees: newEmployees }));
+                        });
                     }
                 };
-                setTimeout(detectAndSubscribe, 1500);
 
-                const unsubCourses = onSnapshot(collection(dbMaster, "courses"), (snap) => setData(p => ({...p, courses: snap.docs.map(d => ({id: d.id, ...d.data()}))})));
-                const unsubSchedules = onSnapshot(collection(dbMaster, "schedules"), (snap) => setData(p => ({...p, schedules: snap.docs.map(d => ({id: d.id, ...d.data()}))})));
-                const unsubRecords = onSnapshot(collection(dbMaster, "records"), (snap) => setData(p => ({...p, records: snap.docs.map(d => ({id: d.id, ...d.data()}))})));
-                const unsubAnalytics = onSnapshot(collection(dbMaster, "analytics"), (snap) => { if(!snap.empty) setData(p => ({...p, analytics: snap.docs[0].data().items || []})); });
-                return () => { unsubCourses(); unsubSchedules(); unsubRecords(); unsubAnalytics(); };
+                init();
+
+                window.addEventListener('online', () => setIsOnline(true));
+                window.addEventListener('offline', () => setIsOnline(false));
+
+                return () => {
+                    unsubscribeEmployees();
+                    window.removeEventListener('online', () => setIsOnline(true));
+                    window.removeEventListener('offline', () => setIsOnline(false));
+                };
             }, []);
 
-            const handleAddDoc = async (col, item) => { await setDoc(doc(collection(dbMaster, col)), { ...item, createdAt: new Date().toISOString() }); };
-            const handleDeleteDoc = async (col, id) => { await deleteDoc(doc(dbMaster, col, id)); };
-            const handleUpdateAnalytics = async (items) => { await setDoc(doc(collection(dbMaster, "analytics"), "stats"), { items }); };
+            const updateData = (key, newData) => { 
+                setData(p => ({...p, [key]: newData})); 
+                DataManager.saveLocal(key, newData); 
+            };
 
             const menuItems = [
                 { id: 'dashboard', label: '경영 대시보드', icon: Icons.LayoutDashboard },
@@ -704,13 +1214,17 @@
                     <aside className="w-72 bg-[#1a1c23] text-white flex flex-col flex-shrink-0 shadow-2xl z-20 no-print">
                         <div className="p-8 border-b border-gray-800">
                             <h1 className="text-xl font-bold flex items-center tracking-tight text-white"><div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center mr-3 shadow-lg shadow-indigo-500/50"><Icons.Users className="w-5 h-5 text-white"/></div>HRD 마스터</h1>
-                            <p className="text-xs text-gray-500 mt-2 ml-1">HR PRO 데이터 연동됨</p>
+                            <p className="text-xs text-gray-500 mt-2 ml-1">기업용 통합 교육 시스템 v4.0</p>
                         </div>
                         <nav className="flex-1 overflow-y-auto py-6 px-4">
                             <ul className="space-y-1.5">{menuItems.map(item => <li key={item.id}><button onClick={() => setActiveTab(item.id)} className={`w-full flex items-center px-4 py-3.5 rounded-xl text-sm font-medium transition-all duration-200 group ${activeTab === item.id ? 'bg-indigo-600 text-white shadow-lg translate-x-1' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}`}><item.icon className={`w-5 h-5 mr-3 ${activeTab === item.id ? 'text-white' : 'text-gray-500 group-hover:text-white'}`} />{item.label}</button></li>)}</ul>
                         </nav>
-                        <div className="p-6">
-                            <button onClick={() => setShowStatusModal(true)} className="w-full bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs py-2 rounded flex items-center justify-center border border-gray-700"><Icons.Activity className="w-3 h-3 mr-1"/> 시스템 진단</button>
+                        <div className="p-6 bg-[#15161c]">
+                            <div className="flex items-center space-x-3 mb-3">
+                                <div className={`w-2 h-2 rounded-full ${isFirebaseAvailable ? 'bg-emerald-500' : 'bg-rose-500'} animate-pulse`}></div>
+                                <span className="text-xs text-gray-400 font-medium">{isFirebaseAvailable ? 'HR Manager 실시간 연동' : '로컬 모드 (오프라인)'}</span>
+                            </div>
+                            <div className="text-[10px] text-gray-600">© {CUR_YEAR} HRD Master Corp.</div>
                         </div>
                     </aside>
 
@@ -718,30 +1232,48 @@
                         <header className="h-20 bg-white/80 backdrop-blur-md border-b border-gray-200/50 flex items-center justify-between px-10 z-10 sticky top-0 no-print">
                             <h2 className="text-xl font-bold text-gray-800 flex items-center">{menuItems.find(i => i.id === activeTab)?.label}</h2>
                             <div className="flex items-center space-x-6">
+                                <div className="flex items-center bg-emerald-50 border border-emerald-100 rounded-full px-4 py-1.5 shadow-sm">
+                                    <span className="relative flex h-2 w-2 mr-2">
+                                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                    </span>
+                                    <span className="text-xs font-bold text-emerald-700">Real-time Sync On</span>
+                                </div>
+
                                 <div className="flex items-center bg-gray-100 rounded-lg px-3 py-1">
                                     <Icons.Filter className="w-4 h-4 text-gray-500 mr-2"/>
-                                    <select value={selectedYear} onChange={(e) => setSelectedYear(e.target.value)} className="bg-transparent text-sm font-bold text-gray-700 outline-none cursor-pointer">
-                                        <option value="2026">2026년</option><option value="2027">2027년</option><option value="2028">2028년</option><option value="2029">2029년</option><option value="2030">2030년</option>
+                                    <select 
+                                        value={selectedYear} 
+                                        onChange={(e) => setSelectedYear(e.target.value)}
+                                        className="bg-transparent text-sm font-bold text-gray-700 outline-none cursor-pointer"
+                                    >
+                                        <option value="2024">2024년</option>
+                                        <option value="2025">2025년</option>
+                                        <option value="2026">2026년</option>
+                                        <option value="2027">2027년</option>
                                     </select>
                                 </div>
+                                <div className="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-bold border-2 border-white shadow-sm cursor-pointer hover:bg-indigo-200 transition">K</div>
                             </div>
                         </header>
                         
                         <div className="flex-1 overflow-y-auto p-10 scroll-smooth">
                             <div className="max-w-7xl mx-auto">
-                                {activeTab === 'dashboard' && <Dashboard courses={data.courses} records={data.records} employees={data.employees} schedules={data.schedules} selectedYear={selectedYear} />}
-                                {activeTab === 'courses' && <CourseManagement courses={data.courses} onAdd={(item) => handleAddDoc('courses', item)} onDelete={(id) => handleDeleteDoc('courses', id)} />}
-                                {activeTab === 'schedule' && <ScheduleManagement schedules={data.schedules} courses={data.courses} selectedYear={selectedYear} onAdd={(item) => handleAddDoc('schedules', item)} onDelete={(id) => handleDeleteDoc('schedules', id)} />}
-                                {activeTab === 'employees' && <EmployeeManager employees={data.employees} onSelect={(id) => {setSelectedEmpId(id); setActiveTab('history');}} />}
-                                {activeTab === 'compliance' && <ComplianceManager courses={data.courses} />}
-                                {activeTab === 'history' && <EmployeeHistory employees={data.employees} records={data.records} courses={data.courses} selectedId={selectedEmpId} onSelectEmployee={(id) => setSelectedEmpId(id)} onBack={() => setSelectedEmpId(null)} onAddRecord={(item) => handleAddDoc('records', item)} onDeleteRecord={(id) => handleDeleteDoc('records', id)} selectedYear={selectedYear} />}
-                                {activeTab === 'analytics' && <Analytics analytics={data.analytics} employees={data.employees} records={data.records} courses={data.courses} selectedYear={selectedYear} onUpdateAnalytics={handleUpdateAnalytics} />}
-                                {activeTab === 'reports' && <Reports employees={data.employees} courses={data.courses} records={data.records} selectedYear={selectedYear} />}
+                                {!initLoaded ? <div className="text-center py-20 text-gray-500 animate-pulse">시스템 로딩중...</div> : (
+                                    <>
+                                        {activeTab === 'dashboard' && <Dashboard courses={data.courses} records={data.records} employees={data.employees} schedules={data.schedules} selectedYear={selectedYear} />}
+                                        {activeTab === 'courses' && <CourseManagement courses={data.courses} onUpdateCourses={(d) => updateData('courses', d)} />}
+                                        {activeTab === 'schedule' && <ScheduleManagement schedules={data.schedules} courses={data.courses} onUpdateSchedules={(d) => updateData('schedules', d)} selectedYear={selectedYear} />}
+                                        {activeTab === 'employees' && <EmployeeManager employees={data.employees} onSelect={(id) => {setSelectedEmpId(id); setActiveTab('history');}} onUpdateEmployees={(d) => updateData('employees', d)} />}
+                                        {activeTab === 'compliance' && <ComplianceManager courses={data.courses} />}
+                                        {activeTab === 'history' && <EmployeeHistory employees={data.employees} records={data.records} courses={data.courses} selectedId={selectedEmpId} onBack={() => setActiveTab('employees')} onUpdateRecords={(d) => updateData('records', d)} selectedYear={selectedYear} />}
+                                        {activeTab === 'analytics' && <Analytics analytics={data.analytics} onUpdateAnalytics={(d) => updateData('analytics', d)} employees={data.employees} records={data.records} courses={data.courses} selectedYear={selectedYear} />}
+                                        {activeTab === 'reports' && <Reports employees={data.employees} courses={data.courses} records={data.records} selectedYear={selectedYear} />}
+                                    </>
+                                )}
                             </div>
                         </div>
                     </main>
-
-                    {showStatusModal && <SystemStatusModal onClose={() => setShowStatusModal(false)} status={status} dataCounts={{employees: data.employees.length}} authErrors={authErrors} activeCollection={activeCollection} scanLog={scanLog} />}
                 </div>
             );
         };
