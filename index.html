@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>HRD Master - 기업용 통합 교육 시스템 (Report Fixed)</title>
+    <title>HRD Master - 기업용 통합 교육 시스템 (Real-time Sync)</title>
     
     <!-- 1. Core Libraries -->
     <script src="https://unpkg.com/react@18.2.0/umd/react.development.js" crossorigin></script>
@@ -32,8 +32,6 @@
         .animate-fade-in { animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1); }
         .glass-panel { background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(12px); border: 1px solid rgba(226, 232, 240, 0.8); box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
         .modal-overlay { background-color: rgba(0, 0, 0, 0.5); backdrop-filter: blur(4px); z-index: 9999; }
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         @media print {
             .no-print { display: none !important; }
@@ -100,16 +98,81 @@
         }
 
         // ------------------------------------------------------------------
-        // [Integration] Data Manager (Raw Data Sync)
+        // [Integration] Data Manager (Real-time Sync & Smart Path)
         // ------------------------------------------------------------------
         const DataManager = {
+            _employeeCollectionRef: null,
+
+            // [내부 함수] 유효한 데이터 경로(CollectionReference)를 찾아내는 탐정 로직
+            async _findValidCollectionRef() {
+                if (this._employeeCollectionRef) return this._employeeCollectionRef;
+                if (!db) return null;
+
+                const artifactIds = ['hr-manager-6635C', 'hr-manager-6635c'];
+                const fixedUserId = 'e22cFeq65waAzg9g0TdWD9WEVYt1';
+                const directCandidates = artifactIds.map(artifactId =>
+                    db.collection('artifacts').doc(artifactId).collection('users').doc(fixedUserId).collection('employees')
+                );
+
+                let firstAccessibleRef = null;
+
+                try {
+                    // 1) 고정 사용자 경로 우선 탐색
+                    for (const ref of directCandidates) {
+                        const snap = await ref.limit(1).get();
+                        if (!firstAccessibleRef) firstAccessibleRef = ref;
+                        if (!snap.empty) {
+                            this._employeeCollectionRef = ref;
+                            return ref;
+                        }
+                    }
+
+                    // 2) artifacts/*/users/*/employees 전체 fallback 탐색
+                    for (const artifactId of artifactIds) {
+                        const usersRef = db.collection('artifacts').doc(artifactId).collection('users');
+                        const usersSnap = await usersRef.get();
+                        if (!usersSnap.empty) {
+                            for (const userDoc of usersSnap.docs) {
+                                const empRef = userDoc.ref.collection('employees');
+                                const empSnap = await empRef.limit(1).get();
+                                if (!firstAccessibleRef) firstAccessibleRef = empRef;
+                                if (!empSnap.empty) {
+                                    this._employeeCollectionRef = empRef;
+                                    return empRef;
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error("Path finding error:", e);
+                }
+
+                if (firstAccessibleRef) {
+                    this._employeeCollectionRef = firstAccessibleRef;
+                    return firstAccessibleRef;
+                }
+                return null;
+            },
+
+            // [핵심] 실시간 구독 메서드 (onSnapshot 사용)
             async subscribeToEmployees(onUpdate) {
                 if (!isFirebaseAvailable) return () => {};
 
-                console.log("📡 Subscribing to ALL 'employees' collections (collectionGroup mode)...");
+                console.log("📡 Subscribing to collectionGroup('employees')...");
+                const fixedPrefixUpper = "artifacts/hr-manager-6635C/users/e22cFeq65waAzg9g0TdWD9WEVYt1/employees/";
+                const fixedPrefixLower = "artifacts/hr-manager-6635c/users/e22cFeq65waAzg9g0TdWD9WEVYt1/employees/";
 
                 const unsubscribe = db.collectionGroup('employees').onSnapshot((snapshot) => {
-                    const employees = snapshot.docs.map(doc => {
+                    let docs = snapshot.docs;
+
+                    // 고정 경로 데이터가 있으면 우선 사용, 없으면 전체 employees 그룹 사용
+                    const scopedDocs = docs.filter(doc => {
+                        const p = doc.ref.path || '';
+                        return p.includes(fixedPrefixUpper) || p.includes(fixedPrefixLower);
+                    });
+                    if (scopedDocs.length > 0) docs = scopedDocs;
+
+                    const mapped = docs.map(doc => {
                         const d = doc.data();
                         return {
                             id: d.id || doc.id,
@@ -120,19 +183,69 @@
                             joinDate: d.joinDate || d.startDate || '',
                             riskScore: d.riskScore || 0,
                             complianceRate: d.complianceRate || 0,
-                            _sourcePath: doc.ref.path 
+                            _sourcePath: doc.ref.path
                         };
                     });
-                    
-                    console.log(`⚡ Raw Data Sync: Loaded ${employees.length} items.`);
+
+                    // 동일 id 중복 방지
+                    const byId = new Map();
+                    mapped.forEach(emp => {
+                        if (!byId.has(emp.id)) byId.set(emp.id, emp);
+                    });
+                    const employees = Array.from(byId.values());
+
+                    if (employees.length === 0) {
+                        const cached = JSON.parse(localStorage.getItem('hrd_v8_employees') || '[]');
+                        if (Array.isArray(cached) && cached.length > 0) {
+                            console.warn(`⚠️ Empty remote snapshot. Keep cached employees (${cached.length}).`);
+                            return;
+                        }
+                    }
+
+                    console.log(`⚡ Real-time Update: ${employees.length} employees loaded.`);
                     onUpdate(employees);
-                    
                     localStorage.setItem('hrd_v8_employees', JSON.stringify(employees));
                 }, (error) => {
                     console.error("🚨 Real-time Sync Error:", error);
                 });
 
-                return unsubscribe; 
+                return unsubscribe;
+            },
+
+            async syncEmployees(employees) {
+                if (!isFirebaseAvailable || !db) return false;
+                const collectionRef = await this._findValidCollectionRef();
+                if (!collectionRef) return false;
+
+                const safeEmployees = (employees || [])
+                    .filter(emp => emp && emp.id)
+                    .map(emp => ({
+                        id: String(emp.id),
+                        name: emp.name || '',
+                        dept: emp.dept || '미배정',
+                        position: emp.position || '사원',
+                        status: emp.status || '재직',
+                        joinDate: emp.joinDate || '',
+                        riskScore: Number(emp.riskScore || 0),
+                        complianceRate: Number(emp.complianceRate || 0)
+                    }));
+
+                const nextIds = new Set(safeEmployees.map(emp => emp.id));
+                const remoteSnap = await collectionRef.get();
+                const batch = db.batch();
+
+                safeEmployees.forEach(emp => {
+                    batch.set(collectionRef.doc(emp.id), emp, { merge: true });
+                });
+
+                remoteSnap.docs.forEach(doc => {
+                    if (!nextIds.has(doc.id)) {
+                        batch.delete(doc.ref);
+                    }
+                });
+
+                await batch.commit();
+                return true;
             },
 
             async loadLocal(key, fallbackGenerator) {
@@ -150,6 +263,9 @@
             schedules: [],
             employees: [],
             records: [],
+            partners: [],
+            budgetItems: [],
+            alerts: { dismissed: [] },
             analytics: [ 
                 {name: '리더십', sat: 0, app: 0}, 
                 {name: '직무기술', sat: 0, app: 0}, 
@@ -183,7 +299,10 @@
             List: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>,
             Grid: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>,
             CheckCircle: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>,
-            Database: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+            Database: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>,
+            Bell: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.674C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>,
+            Wallet: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 7V4a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h14a1 1 0 0 0 1-1v-3"/><path d="M2 7h18a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H2"/><path d="M16 12h.01"/></svg>,
+            Building2: (p) => <svg {...p} xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v8h4"/><path d="M18 9h2a2 2 0 0 1 2 2v11h-4"/><path d="M10 6h4"/><path d="M10 10h4"/><path d="M10 14h4"/><path d="M10 18h4"/></svg>
         };
 
         const StatusBadge = ({ status }) => {
@@ -220,6 +339,7 @@
              const filteredRecords = (records || []).filter(r => r.date && r.date.startsWith(selectedYear));
              const safeEmployees = employees || [];
              
+             // 직급별 참여 현황
             const rankStats = filteredRecords.reduce((acc, r) => {
                 const emp = safeEmployees.find(e => e.id === r.empId);
                 if (emp && r.status === '이수') {
@@ -298,7 +418,6 @@
             
             const filteredRecords = safeRecords.filter(r => r.date && r.date.startsWith(selectedYear));
 
-            // [수정] 보고서 테이블 구조 변경 (사번 제거, 순서: 부서 -> 성명 -> 직급 -> 이수율)
             return (
                 <div className="glass-panel rounded-2xl p-12 animate-fade-in text-center max-w-4xl mx-auto mt-8 no-print">
                     <div className="inline-flex justify-center items-center w-24 h-24 bg-gradient-to-br from-indigo-50 to-violet-50 rounded-full mb-6 shadow-sm"><Icons.FileText className="w-10 h-10 text-indigo-500" /></div>
@@ -323,30 +442,8 @@
                                     </table>
                                     <h3 className="text-lg font-bold mb-2 border-b pb-2">2. 이수 현황 ({filteredRecords.length}건)</h3>
                                     <table className="w-full text-sm border-collapse border">
-                                        {/* [수정] 헤더 변경: 사번 제거, 부서->성명->직급->이수율 순서 변경 */}
-                                        <thead>
-                                            <tr className="bg-gray-100">
-                                                <th className="border p-2 w-1/4">부서</th>
-                                                <th className="border p-2 w-1/4">성명</th>
-                                                <th className="border p-2 w-1/4">직급</th>
-                                                <th className="border p-2 w-1/4">이수율</th>
-                                            </tr>
-                                        </thead>
-                                        {/* [수정] 바디 변경: 사번 제거 및 데이터 매핑 순서 변경 */}
-                                        <tbody>
-                                            {safeEmployees.map(e => (
-                                                <tr key={e.id}>
-                                                    <td className="border p-2 text-center">{e.dept}</td>
-                                                    <td className="border p-2 text-center font-bold">{e.name}</td>
-                                                    <td className="border p-2 text-center">{e.position}</td>
-                                                    <td className="border p-2 text-center">
-                                                        <span className={e.complianceRate < 100 ? "text-rose-600 font-bold" : "text-emerald-600 font-bold"}>
-                                                            {e.complianceRate}%
-                                                        </span>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
+                                        <thead><tr className="bg-gray-100"><th className="border p-2">사번</th><th className="border p-2">성명</th><th className="border p-2">부서</th><th className="border p-2">이수율</th></tr></thead>
+                                        <tbody>{safeEmployees.map(e => <tr key={e.id}><td className="border p-2 text-center">{e.id}</td><td className="border p-2 text-center">{e.name}</td><td className="border p-2 text-center">{e.dept}</td><td className="border p-2 text-center">{e.complianceRate}%</td></tr>)}</tbody>
                                     </table>
                                 </div>
                             </div>
@@ -766,14 +863,16 @@
             );
         };
 
-        const ScheduleManagement = ({ schedules, courses, onUpdateSchedules, selectedYear }) => {
+        const ScheduleManagement = ({ schedules, courses, partners, onUpdateSchedules, selectedYear }) => {
             const [view, setView] = useState('month'); 
             const [isModalOpen, setIsModalOpen] = useState(false);
             const [formData, setFormData] = useState({ courseId: '', date: '', location: '', instructor: '', status: '예정' });
 
+            // 연도 필터링된 일정만 사용
             const filteredSchedules = schedules.filter(s => s.date.startsWith(selectedYear));
             const validSchedules = filteredSchedules.filter(s => courses.find(c => c.id === s.courseId));
 
+            // 달력 렌더링용 변수
             const daysInMonth = new Date(selectedYear, CUR_MONTH, 0).getDate();
             const firstDay = new Date(selectedYear, CUR_MONTH - 1, 1).getDay();
             const days = Array.from({length: daysInMonth}, (_, i) => i + 1);
@@ -858,7 +957,10 @@
                                     <input type="text" className="w-full border p-2 rounded" placeholder="예: 1연수실" value={formData.location} onChange={e => setFormData({...formData, location: e.target.value})}/>
                                     
                                     <label className="block text-sm font-bold text-gray-700">강사</label>
-                                    <input type="text" className="w-full border p-2 rounded" placeholder="강사명" value={formData.instructor} onChange={e => setFormData({...formData, instructor: e.target.value})}/>
+                                    <input type="text" list="partner-instructors" className="w-full border p-2 rounded" placeholder="강사명" value={formData.instructor} onChange={e => setFormData({...formData, instructor: e.target.value})}/>
+                                    <datalist id="partner-instructors">
+                                        {(partners || []).map(p => <option key={p.id} value={p.name} />)}
+                                    </datalist>
                                 </div>
                                 <div className="mt-6 flex space-x-3"><button onClick={() => setIsModalOpen(false)} className="flex-1 py-2 border rounded hover:bg-gray-50">취소</button><button onClick={handleAdd} className="flex-1 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700">등록</button></div>
                             </div>
@@ -892,6 +994,288 @@
                 </div>
             </div>
         );
+
+        const buildAlerts = ({ courses, schedules, employees, records, selectedYear }) => {
+            const now = new Date();
+            const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const courseMap = new Map((courses || []).map(c => [c.id, c]));
+            const yearSchedules = (schedules || []).filter(s => s.date && s.date.startsWith(selectedYear));
+            const yearRecords = (records || []).filter(r => r.date && r.date.startsWith(selectedYear));
+            const alerts = [];
+
+            yearSchedules.forEach(s => {
+                const scheduleDate = new Date(s.date);
+                const daysLeft = Math.ceil((scheduleDate - today) / (1000 * 60 * 60 * 24));
+                if (daysLeft >= 0 && daysLeft <= 14 && s.status === '예정') {
+                    alerts.push({
+                        id: `schedule_${s.id}`,
+                        level: daysLeft <= 3 ? 'High' : 'Medium',
+                        title: `임박 일정: ${s.title || '교육 일정'}`,
+                        description: `${s.date} / ${s.location || '장소 미정'} / ${s.instructor || '강사 미정'}`
+                    });
+                }
+            });
+
+            (courses || []).filter(c => c.type === '법정').forEach(c => {
+                const hasSchedule = yearSchedules.some(s => s.courseId === c.id);
+                if (!hasSchedule) {
+                    alerts.push({
+                        id: `legal_missing_${c.id}_${selectedYear}`,
+                        level: 'High',
+                        title: `법정교육 일정 누락: ${c.name}`,
+                        description: `${selectedYear}년도 일정이 아직 등록되지 않았습니다.`
+                    });
+                }
+            });
+
+            (employees || []).forEach(emp => {
+                if ((emp.complianceRate || 0) < 80) {
+                    alerts.push({
+                        id: `emp_rate_${emp.id}_${selectedYear}`,
+                        level: 'Medium',
+                        title: `저이수율 사원: ${emp.name}`,
+                        description: `현재 이수율 ${(emp.complianceRate || 0)}% (기준 80% 미만)`
+                    });
+                }
+            });
+
+            yearRecords.filter(r => r.status === '미이수').forEach(r => {
+                const course = courseMap.get(r.courseId);
+                const emp = (employees || []).find(e => e.id === r.empId);
+                alerts.push({
+                    id: `record_fail_${r.id}`,
+                    level: 'High',
+                    title: `미이수 발생: ${emp ? emp.name : r.empId}`,
+                    description: `${course ? course.name : '과정 미확인'} / 완료일 ${r.date}`
+                });
+            });
+
+            return alerts;
+        };
+
+        const AlertsCenter = ({ courses, schedules, employees, records, selectedYear, alertsState, onUpdateAlerts }) => {
+            const allAlerts = useMemo(() => buildAlerts({ courses, schedules, employees, records, selectedYear }), [courses, schedules, employees, records, selectedYear]);
+            const dismissedIds = alertsState?.dismissed || [];
+            const visibleAlerts = allAlerts.filter(a => !dismissedIds.includes(a.id));
+            const highCount = visibleAlerts.filter(a => a.level === 'High').length;
+
+            const dismissAlert = (id) => {
+                const next = Array.from(new Set([...(alertsState?.dismissed || []), id]));
+                onUpdateAlerts({ dismissed: next });
+            };
+
+            const dismissAllVisible = () => {
+                if (visibleAlerts.length === 0) return;
+                const next = Array.from(new Set([...(alertsState?.dismissed || []), ...visibleAlerts.map(a => a.id)]));
+                onUpdateAlerts({ dismissed: next });
+            };
+
+            return (
+                <div className="space-y-6 animate-fade-in">
+                    <div className="glass-panel p-6 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div>
+                            <h3 className="text-xl font-bold text-gray-800">알림센터</h3>
+                            <p className="text-sm text-gray-500 mt-1">{selectedYear}년 기준 운영 리스크와 후속 조치 항목입니다.</p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <span className="px-3 py-1.5 rounded-full text-xs font-bold bg-rose-50 text-rose-600">긴급 {highCount}건</span>
+                            <span className="px-3 py-1.5 rounded-full text-xs font-bold bg-indigo-50 text-indigo-600">미확인 {visibleAlerts.length}건</span>
+                            <button onClick={dismissAllVisible} className="text-xs px-3 py-1.5 rounded-lg border border-indigo-200 text-indigo-600 hover:bg-indigo-50">일괄 확인</button>
+                            <button onClick={() => onUpdateAlerts({ dismissed: [] })} className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50">전체 다시보기</button>
+                        </div>
+                    </div>
+                    <div className="glass-panel rounded-2xl overflow-hidden">
+                        <div className="p-4 border-b bg-gray-50/60 text-sm text-gray-500">알림 목록</div>
+                        <div className="divide-y">
+                            {visibleAlerts.length === 0 ? (
+                                <div className="p-10 text-center text-gray-400">표시할 알림이 없습니다.</div>
+                            ) : (
+                                visibleAlerts.map(alert => (
+                                    <div key={alert.id} className="p-5 flex items-start justify-between gap-4 hover:bg-gray-50/40">
+                                        <div>
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <StatusBadge status={alert.level} />
+                                                <h4 className="font-bold text-gray-800">{alert.title}</h4>
+                                            </div>
+                                            <p className="text-sm text-gray-500">{alert.description}</p>
+                                        </div>
+                                        <button onClick={() => dismissAlert(alert.id)} className="text-xs px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-100 whitespace-nowrap">확인 완료</button>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const PartnerManager = ({ partners, onUpdatePartners }) => {
+            const [isModalOpen, setIsModalOpen] = useState(false);
+            const [editMode, setEditMode] = useState(false);
+            const [formData, setFormData] = useState({ id: '', name: '', type: '강사', contact: '', email: '', rate: '', status: '활성' });
+
+            const openModal = (partner = null) => {
+                if (partner) {
+                    setEditMode(true);
+                    setFormData(partner);
+                } else {
+                    setEditMode(false);
+                    setFormData({ id: '', name: '', type: '강사', contact: '', email: '', rate: '', status: '활성' });
+                }
+                setIsModalOpen(true);
+            };
+
+            const handleSave = () => {
+                if (!formData.name) return alert('명칭을 입력하세요.');
+                const normalized = { ...formData, rate: Number(formData.rate || 0) };
+                if (editMode) onUpdatePartners(partners.map(p => p.id === normalized.id ? normalized : p));
+                else onUpdatePartners([...partners, { ...normalized, id: `P${Date.now()}` }]);
+                setIsModalOpen(false);
+            };
+
+            const handleDelete = (id) => {
+                if (confirm('삭제하시겠습니까?')) onUpdatePartners(partners.filter(p => p.id !== id));
+            };
+
+            return (
+                <div className="glass-panel rounded-2xl animate-fade-in overflow-hidden">
+                    <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-white/50">
+                        <h2 className="text-xl font-bold text-gray-800">강사/업체 관리</h2>
+                        <button onClick={() => openModal()} className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-indigo-700 transition shadow-lg">+ 등록</button>
+                    </div>
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm text-left">
+                            <thead className="bg-gray-50/50 text-gray-500 border-b border-gray-100"><tr><th className="px-6 py-4">구분</th><th className="px-6 py-4">명칭</th><th className="px-6 py-4">연락처</th><th className="px-6 py-4">이메일</th><th className="px-6 py-4">단가(원)</th><th className="px-6 py-4">상태</th><th className="px-6 py-4 text-right">관리</th></tr></thead>
+                            <tbody className="divide-y divide-gray-50">
+                                {partners.length === 0 ? <tr><td colSpan="7" className="p-8 text-center text-gray-400">등록된 강사/업체가 없습니다.</td></tr> :
+                                partners.map(p => (
+                                    <tr key={p.id} className="hover:bg-indigo-50/30 transition">
+                                        <td className="px-6 py-4"><span className="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-700">{p.type}</span></td>
+                                        <td className="px-6 py-4 font-bold text-gray-700">{p.name}</td>
+                                        <td className="px-6 py-4 text-gray-600">{p.contact || '-'}</td>
+                                        <td className="px-6 py-4 text-gray-600">{p.email || '-'}</td>
+                                        <td className="px-6 py-4 text-gray-600">{(p.rate || 0).toLocaleString()}</td>
+                                        <td className="px-6 py-4"><StatusBadge status={p.status === '활성' ? '재직' : '퇴사'} /></td>
+                                        <td className="px-6 py-4 text-right space-x-2"><button onClick={() => openModal(p)} className="text-indigo-600 hover:bg-indigo-50 p-2 rounded"><Icons.Edit className="w-4 h-4"/></button><button onClick={() => handleDelete(p.id)} className="text-rose-500 hover:bg-rose-50 p-2 rounded"><Icons.Trash2 className="w-4 h-4"/></button></td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                    {isModalOpen && ReactDOM.createPortal(
+                        <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay" onClick={() => setIsModalOpen(false)}>
+                            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-xl" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-lg font-bold mb-5">{editMode ? '강사/업체 수정' : '강사/업체 등록'}</h3>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">명칭</label><input className="w-full border p-2.5 rounded-lg" value={formData.name} onChange={e => setFormData({ ...formData, name: e.target.value })} /></div>
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">구분</label><select className="w-full border p-2.5 rounded-lg" value={formData.type} onChange={e => setFormData({ ...formData, type: e.target.value })}><option>강사</option><option>교육업체</option><option>플랫폼</option></select></div>
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">연락처</label><input className="w-full border p-2.5 rounded-lg" value={formData.contact} onChange={e => setFormData({ ...formData, contact: e.target.value })} /></div>
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">이메일</label><input className="w-full border p-2.5 rounded-lg" value={formData.email} onChange={e => setFormData({ ...formData, email: e.target.value })} /></div>
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">단가(원)</label><input type="number" className="w-full border p-2.5 rounded-lg" value={formData.rate} onChange={e => setFormData({ ...formData, rate: e.target.value })} /></div>
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">상태</label><select className="w-full border p-2.5 rounded-lg" value={formData.status} onChange={e => setFormData({ ...formData, status: e.target.value })}><option>활성</option><option>비활성</option></select></div>
+                                </div>
+                                <div className="mt-6 flex gap-3"><button onClick={() => setIsModalOpen(false)} className="flex-1 py-2.5 border rounded-xl hover:bg-gray-50">취소</button><button onClick={handleSave} className="flex-1 py-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700">저장</button></div>
+                            </div>
+                        </div>,
+                        document.body
+                    )}
+                </div>
+            );
+        };
+
+        const BudgetManager = ({ budgetItems, courses, partners, selectedYear, onUpdateBudgetItems }) => {
+            const [isModalOpen, setIsModalOpen] = useState(false);
+            const [editMode, setEditMode] = useState(false);
+            const [formData, setFormData] = useState({ id: '', date: '', category: '강사료', amount: '', courseId: '', partnerId: '', note: '' });
+            const yearItems = (budgetItems || []).filter(item => item.date && item.date.startsWith(selectedYear));
+            const monthKey = `${selectedYear}-${String(CUR_MONTH).padStart(2, '0')}`;
+            const yearTotal = yearItems.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+            const monthTotal = yearItems.filter(item => item.date.startsWith(monthKey)).reduce((sum, item) => sum + Number(item.amount || 0), 0);
+
+            const monthlyAgg = yearItems.reduce((acc, item) => {
+                const month = parseInt(item.date.split('-')[1], 10);
+                const key = `${month}월`;
+                acc[key] = (acc[key] || 0) + Number(item.amount || 0);
+                return acc;
+            }, {});
+            const monthlyData = Object.keys(monthlyAgg).length > 0 ? Object.keys(monthlyAgg).sort((a, b) => parseInt(a, 10) - parseInt(b, 10)).map(k => ({ name: k, amount: monthlyAgg[k] })) : Array.from({ length: 12 }, (_, i) => ({ name: `${i + 1}월`, amount: 0 }));
+
+            const openModal = (item = null) => {
+                if (item) { setEditMode(true); setFormData(item); }
+                else { setEditMode(false); setFormData({ id: '', date: '', category: '강사료', amount: '', courseId: '', partnerId: '', note: '' }); }
+                setIsModalOpen(true);
+            };
+
+            const handleSave = () => {
+                if (!formData.date || !formData.amount) return alert('날짜와 금액은 필수입니다.');
+                const normalized = { ...formData, amount: Number(formData.amount || 0) };
+                if (editMode) onUpdateBudgetItems(budgetItems.map(i => i.id === normalized.id ? normalized : i));
+                else onUpdateBudgetItems([...budgetItems, { ...normalized, id: `B${Date.now()}` }]);
+                setIsModalOpen(false);
+            };
+
+            const handleDelete = (id) => {
+                if (confirm('삭제하시겠습니까?')) onUpdateBudgetItems(budgetItems.filter(i => i.id !== id));
+            };
+
+            return (
+                <div className="space-y-6 animate-fade-in">
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="glass-panel p-5 rounded-2xl"><p className="text-sm text-gray-500">연간 집행액 ({selectedYear})</p><h3 className="text-2xl font-bold text-gray-900 mt-1">{yearTotal.toLocaleString()}원</h3></div>
+                        <div className="glass-panel p-5 rounded-2xl"><p className="text-sm text-gray-500">당월 집행액 ({CUR_MONTH}월)</p><h3 className="text-2xl font-bold text-gray-900 mt-1">{monthTotal.toLocaleString()}원</h3></div>
+                        <div className="glass-panel p-5 rounded-2xl flex items-center justify-end"><button onClick={() => openModal()} className="bg-indigo-600 text-white px-5 py-2.5 rounded-xl text-sm font-semibold hover:bg-indigo-700 shadow-lg">+ 비용 등록</button></div>
+                    </div>
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="glass-panel p-6 rounded-2xl lg:col-span-2 h-80">
+                            <h3 className="font-bold text-gray-800 mb-4">월별 집행 추이</h3>
+                            <ResponsiveContainer width="100%" height="90%">
+                                <BarChart data={monthlyData}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name" /><YAxis tickFormatter={(v) => `${Math.round(v / 10000)}만`} /><Tooltip formatter={(v) => `${Number(v).toLocaleString()}원`} /><Bar dataKey="amount" fill="#6366F1" radius={[4, 4, 0, 0]} /></BarChart>
+                            </ResponsiveContainer>
+                        </div>
+                        <div className="glass-panel p-6 rounded-2xl">
+                            <h3 className="font-bold text-gray-800 mb-4">카테고리 집계</h3>
+                            <div className="space-y-2">
+                                {Object.entries(yearItems.reduce((acc, item) => { acc[item.category] = (acc[item.category] || 0) + Number(item.amount || 0); return acc; }, {})).map(([k, v]) => (<div key={k} className="flex items-center justify-between text-sm border-b border-gray-100 pb-2"><span className="text-gray-600">{k}</span><span className="font-bold text-gray-800">{v.toLocaleString()}원</span></div>))}
+                                {yearItems.length === 0 && <div className="text-sm text-gray-400">등록된 비용 데이터가 없습니다.</div>}
+                            </div>
+                        </div>
+                    </div>
+                    <div className="glass-panel rounded-2xl overflow-hidden">
+                        <div className="p-4 border-b bg-gray-50/60 text-sm text-gray-500">집행 내역</div>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-sm text-left">
+                                <thead className="bg-white border-b"><tr><th className="px-6 py-3">일자</th><th className="px-6 py-3">구분</th><th className="px-6 py-3">과정</th><th className="px-6 py-3">업체/강사</th><th className="px-6 py-3">금액</th><th className="px-6 py-3">비고</th><th className="px-6 py-3 text-right">관리</th></tr></thead>
+                                <tbody className="divide-y divide-gray-50">
+                                    {yearItems.length === 0 ? <tr><td colSpan="7" className="p-8 text-center text-gray-400">등록된 집행 내역이 없습니다.</td></tr> :
+                                    yearItems.sort((a, b) => b.date.localeCompare(a.date)).map(item => {
+                                        const course = courses.find(c => c.id === item.courseId);
+                                        const partner = partners.find(p => p.id === item.partnerId);
+                                        return <tr key={item.id} className="hover:bg-indigo-50/30"><td className="px-6 py-4">{item.date}</td><td className="px-6 py-4">{item.category}</td><td className="px-6 py-4">{course ? course.name : '-'}</td><td className="px-6 py-4">{partner ? partner.name : '-'}</td><td className="px-6 py-4 font-bold text-gray-800">{Number(item.amount || 0).toLocaleString()}원</td><td className="px-6 py-4 text-gray-500">{item.note || '-'}</td><td className="px-6 py-4 text-right space-x-2"><button onClick={() => openModal(item)} className="text-indigo-600 hover:bg-indigo-50 p-2 rounded"><Icons.Edit className="w-4 h-4"/></button><button onClick={() => handleDelete(item.id)} className="text-rose-500 hover:bg-rose-50 p-2 rounded"><Icons.Trash2 className="w-4 h-4"/></button></td></tr>;
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    {isModalOpen && ReactDOM.createPortal(
+                        <div className="fixed inset-0 z-50 flex items-center justify-center modal-overlay" onClick={() => setIsModalOpen(false)}>
+                            <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-xl" onClick={e => e.stopPropagation()}>
+                                <h3 className="text-lg font-bold mb-5">{editMode ? '비용 수정' : '비용 등록'}</h3>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">일자</label><input type="date" className="w-full border p-2.5 rounded-lg" value={formData.date} onChange={e => setFormData({ ...formData, date: e.target.value })} /></div>
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">카테고리</label><select className="w-full border p-2.5 rounded-lg" value={formData.category} onChange={e => setFormData({ ...formData, category: e.target.value })}><option>강사료</option><option>교육업체비</option><option>콘텐츠/교재</option><option>플랫폼</option><option>기타</option></select></div>
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">과정</label><select className="w-full border p-2.5 rounded-lg" value={formData.courseId} onChange={e => setFormData({ ...formData, courseId: e.target.value })}><option value="">선택 안함</option>{courses.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">업체/강사</label><select className="w-full border p-2.5 rounded-lg" value={formData.partnerId} onChange={e => setFormData({ ...formData, partnerId: e.target.value })}><option value="">선택 안함</option>{partners.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">금액(원)</label><input type="number" className="w-full border p-2.5 rounded-lg" value={formData.amount} onChange={e => setFormData({ ...formData, amount: e.target.value })} /></div>
+                                    <div><label className="block text-sm font-bold text-gray-700 mb-1">비고</label><input className="w-full border p-2.5 rounded-lg" value={formData.note} onChange={e => setFormData({ ...formData, note: e.target.value })} /></div>
+                                </div>
+                                <div className="mt-6 flex gap-3"><button onClick={() => setIsModalOpen(false)} className="flex-1 py-2.5 border rounded-xl hover:bg-gray-50">취소</button><button onClick={handleSave} className="flex-1 py-2.5 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700">저장</button></div>
+                            </div>
+                        </div>,
+                        document.body
+                    )}
+                </div>
+            );
+        };
 
         const EmployeeManager = ({ employees, onSelect, onUpdateEmployees }) => {
             const [search, setSearch] = useState('');
@@ -1170,10 +1554,10 @@
         };
 
         // --- Main App ---
-        function App() {
+        const App = () => {
             const [activeTab, setActiveTab] = useState('dashboard');
             const [selectedYear, setSelectedYear] = useState(String(CUR_YEAR));
-            const [data, setData] = useState({ courses: [], schedules: [], employees: [], records: [], analytics: [] });
+            const [data, setData] = useState({ courses: [], schedules: [], employees: [], records: [], partners: [], budgetItems: [], alerts: { dismissed: [] }, analytics: [] });
             const [isOnline, setIsOnline] = useState(navigator.onLine);
             const [selectedEmpId, setSelectedEmpId] = useState(null);
             const [initLoaded, setInitLoaded] = useState(false);
@@ -1183,17 +1567,26 @@
 
                 const init = async () => {
                     const empty = generateEmptyData();
+                    
+                    // 1. 일반 데이터 로드 (LocalStorage)
                     const c = await DataManager.loadLocal('courses', () => empty.courses);
                     const s = await DataManager.loadLocal('schedules', () => empty.schedules);
                     const r = await DataManager.loadLocal('records', () => empty.records);
+                    const p = await DataManager.loadLocal('partners', () => empty.partners);
+                    const b = await DataManager.loadLocal('budgetItems', () => empty.budgetItems);
+                    const al = await DataManager.loadLocal('alerts', () => empty.alerts);
                     const a = await DataManager.loadLocal('analytics', () => empty.analytics);
+                    
+                    // 2. 사원 데이터 초기 로드 (LocalStorage fallback)
                     let e = await DataManager.loadLocal('employees', () => empty.employees);
                     
-                    setData({ courses: c, schedules: s, employees: e, records: r, analytics: a });
+                    setData({ courses: c, schedules: s, employees: e, records: r, partners: p, budgetItems: b, alerts: al, analytics: a });
                     setInitLoaded(true);
 
+                    // 3. [Real-time] Firebase 실시간 구독 시작
                     if (isFirebaseAvailable) {
                         unsubscribeEmployees = await DataManager.subscribeToEmployees((newEmployees) => {
+                            // 변경사항 감지 시 상태 즉시 업데이트
                             setData(prev => ({ ...prev, employees: newEmployees }));
                         });
                     }
@@ -1204,6 +1597,7 @@
                 window.addEventListener('online', () => setIsOnline(true));
                 window.addEventListener('offline', () => setIsOnline(false));
 
+                // Cleanup: 컴포넌트 언마운트 시 구독 해제
                 return () => {
                     unsubscribeEmployees();
                     window.removeEventListener('online', () => setIsOnline(true));
@@ -1216,10 +1610,36 @@
                 DataManager.saveLocal(key, newData); 
             };
 
+            const alertCount = useMemo(() => {
+                const allAlerts = buildAlerts({
+                    courses: data.courses,
+                    schedules: data.schedules,
+                    employees: data.employees,
+                    records: data.records,
+                    selectedYear
+                });
+                const dismissed = data.alerts?.dismissed || [];
+                return allAlerts.filter(a => !dismissed.includes(a.id)).length;
+            }, [data.courses, data.schedules, data.employees, data.records, data.alerts, selectedYear]);
+
+            const yearOptions = useMemo(() => {
+                const dataYears = [
+                    ...data.schedules.map(s => (s.date || '').slice(0, 4)),
+                    ...data.records.map(r => (r.date || '').slice(0, 4)),
+                    ...data.budgetItems.map(b => (b.date || '').slice(0, 4))
+                ].filter(y => /^\d{4}$/.test(y));
+                const minYear = dataYears.length ? Math.min(...dataYears.map(Number)) : CUR_YEAR - 2;
+                const maxYear = Math.max(CUR_YEAR + 3, ...(dataYears.length ? dataYears.map(Number) : [CUR_YEAR]));
+                return Array.from({ length: maxYear - minYear + 1 }, (_, i) => String(minYear + i));
+            }, [data.schedules, data.records, data.budgetItems]);
+
             const menuItems = [
                 { id: 'dashboard', label: '경영 대시보드', icon: Icons.LayoutDashboard },
+                { id: 'alerts', label: '알림센터', icon: Icons.Bell },
                 { id: 'courses', label: '교육 과정 관리', icon: Icons.BookOpen },
                 { id: 'schedule', label: '교육 일정 관리', icon: Icons.Calendar },
+                { id: 'budget', label: '예산/비용 관리', icon: Icons.Wallet },
+                { id: 'partners', label: '강사/업체 관리', icon: Icons.Building2 },
                 { id: 'employees', label: '사원 관리', icon: Icons.Users },
                 { id: 'compliance', label: '법정교육/감사', icon: Icons.ShieldAlert },
                 { id: 'history', label: '개인 이력 조회', icon: Icons.GraduationCap },
@@ -1235,7 +1655,7 @@
                             <p className="text-xs text-gray-500 mt-2 ml-1">기업용 통합 교육 시스템 v4.0</p>
                         </div>
                         <nav className="flex-1 overflow-y-auto py-6 px-4">
-                            <ul className="space-y-1.5">{menuItems.map(item => <li key={item.id}><button onClick={() => setActiveTab(item.id)} className={`w-full flex items-center px-4 py-3.5 rounded-xl text-sm font-medium transition-all duration-200 group ${activeTab === item.id ? 'bg-indigo-600 text-white shadow-lg translate-x-1' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}`}><item.icon className={`w-5 h-5 mr-3 ${activeTab === item.id ? 'text-white' : 'text-gray-500 group-hover:text-white'}`} />{item.label}</button></li>)}</ul>
+                            <ul className="space-y-1.5">{menuItems.map(item => <li key={item.id}><button onClick={() => setActiveTab(item.id)} className={`w-full flex items-center justify-between px-4 py-3.5 rounded-xl text-sm font-medium transition-all duration-200 group ${activeTab === item.id ? 'bg-indigo-600 text-white shadow-lg translate-x-1' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}`}><span className="flex items-center"><item.icon className={`w-5 h-5 mr-3 ${activeTab === item.id ? 'text-white' : 'text-gray-500 group-hover:text-white'}`} />{item.label}</span>{item.id === 'alerts' && alertCount > 0 && <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${activeTab === item.id ? 'bg-white text-indigo-700' : 'bg-rose-500 text-white'}`}>{alertCount}</span>}</button></li>)}</ul>
                         </nav>
                         <div className="p-6 bg-[#15161c]">
                             <div className="flex items-center space-x-3 mb-3">
@@ -1250,6 +1670,7 @@
                         <header className="h-20 bg-white/80 backdrop-blur-md border-b border-gray-200/50 flex items-center justify-between px-10 z-10 sticky top-0 no-print">
                             <h2 className="text-xl font-bold text-gray-800 flex items-center">{menuItems.find(i => i.id === activeTab)?.label}</h2>
                             <div className="flex items-center space-x-6">
+                                {/* 실시간 연동 표시 배지 추가 */}
                                 <div className="flex items-center bg-emerald-50 border border-emerald-100 rounded-full px-4 py-1.5 shadow-sm">
                                     <span className="relative flex h-2 w-2 mr-2">
                                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
@@ -1265,10 +1686,7 @@
                                         onChange={(e) => setSelectedYear(e.target.value)}
                                         className="bg-transparent text-sm font-bold text-gray-700 outline-none cursor-pointer"
                                     >
-                                        <option value="2024">2024년</option>
-                                        <option value="2025">2025년</option>
-                                        <option value="2026">2026년</option>
-                                        <option value="2027">2027년</option>
+                                        {yearOptions.map(y => <option key={y} value={y}>{y}년</option>)}
                                     </select>
                                 </div>
                                 <div className="w-10 h-10 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-700 font-bold border-2 border-white shadow-sm cursor-pointer hover:bg-indigo-200 transition">K</div>
@@ -1280,8 +1698,11 @@
                                 {!initLoaded ? <div className="text-center py-20 text-gray-500 animate-pulse">시스템 로딩중...</div> : (
                                     <>
                                         {activeTab === 'dashboard' && <Dashboard courses={data.courses} records={data.records} employees={data.employees} schedules={data.schedules} selectedYear={selectedYear} />}
+                                        {activeTab === 'alerts' && <AlertsCenter courses={data.courses} schedules={data.schedules} employees={data.employees} records={data.records} selectedYear={selectedYear} alertsState={data.alerts} onUpdateAlerts={(d) => updateData('alerts', d)} />}
                                         {activeTab === 'courses' && <CourseManagement courses={data.courses} onUpdateCourses={(d) => updateData('courses', d)} />}
-                                        {activeTab === 'schedule' && <ScheduleManagement schedules={data.schedules} courses={data.courses} onUpdateSchedules={(d) => updateData('schedules', d)} selectedYear={selectedYear} />}
+                                        {activeTab === 'schedule' && <ScheduleManagement schedules={data.schedules} courses={data.courses} partners={data.partners} onUpdateSchedules={(d) => updateData('schedules', d)} selectedYear={selectedYear} />}
+                                        {activeTab === 'budget' && <BudgetManager budgetItems={data.budgetItems} courses={data.courses} partners={data.partners} selectedYear={selectedYear} onUpdateBudgetItems={(d) => updateData('budgetItems', d)} />}
+                                        {activeTab === 'partners' && <PartnerManager partners={data.partners} onUpdatePartners={(d) => updateData('partners', d)} />}
                                         {activeTab === 'employees' && <EmployeeManager employees={data.employees} onSelect={(id) => {setSelectedEmpId(id); setActiveTab('history');}} onUpdateEmployees={(d) => updateData('employees', d)} />}
                                         {activeTab === 'compliance' && <ComplianceManager courses={data.courses} />}
                                         {activeTab === 'history' && <EmployeeHistory employees={data.employees} records={data.records} courses={data.courses} selectedId={selectedEmpId} onBack={() => setActiveTab('employees')} onUpdateRecords={(d) => updateData('records', d)} selectedYear={selectedYear} />}
